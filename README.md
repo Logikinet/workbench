@@ -79,76 +79,279 @@ PWA 导航 **「文档工作流」**（`#/documents`），或调用 `/api/docume
 | --- | --- |
 | `PAW_OFFICECLI_PATH` | `officecli` 可执行文件绝对路径 |
 
-## Install
+## 详细使用步骤（从 Clone 到日常使用）
 
-```bash
+以下命令均在 **Windows** 上执行。推荐使用 **PowerShell** 或 **Windows Terminal**。  
+**工作目录始终是仓库根目录**（clone 后名为 `workbench` 的那一层，里面有根级 `package.json`、`apps/`、`README.md`）。
+
+### 0. 准备环境
+
+1. 安装 [Node.js 20+](https://nodejs.org/)（安装后新开终端，执行 `node -v`、`npm -v` 确认可用）。
+2. 安装 [Git](https://git-scm.com/)。
+3. （可选）安装 [Codex CLI](https://github.com/openai/codex) — 写代码隔离执行。
+4. （可选）安装 [OfficeCLI](https://github.com/iOfficeAI/OfficeCLI) — 论文/报告 DOCX。
+5. （可选）安装 [Zotero](https://www.zotero.org/) 桌面端，并允许本机其他应用通过本地 API 访问（默认端口 `23119`）。
+6. （可选）安装 Microsoft Word / WPS + Zotero 插件 — 动态引用与终排版。
+
+### 1. 克隆仓库
+
+在任意你有写权限的目录打开终端，例如 `D:\dev`：
+
+```powershell
+cd D:\dev
 git clone https://github.com/Logikinet/workbench.git
 cd workbench
+```
+
+此时当前目录应为：
+
+```text
+D:\dev\workbench\          ← 你必须在这里执行后续 npm 命令
+  package.json
+  apps\
+  packaging\
+  README.md
+  ...
+```
+
+确认：
+
+```powershell
+Get-Location
+# 应显示 ...\workbench
+dir package.json
+# 应能看到根目录 package.json
+```
+
+若你 clone 到了别的盘，只要 `cd` 进该仓库根目录即可，路径不限。
+
+### 2. 安装依赖
+
+仍在 **仓库根目录** `workbench`：
+
+```powershell
 npm install
 ```
 
-## Development
+首次安装可能较久。成功后根目录会出现 `node_modules\`（workspaces 会装 `apps/*`）。
 
-```bash
+### 3. 开发模式启动（推荐第一次试用）
+
+仍在 **仓库根目录**：
+
+```powershell
 npm run dev
 ```
 
-- 服务：`http://127.0.0.1:41731`（仅本机）
-- 前端：Vite 开发服务器（`apps/web`）
+该命令会同时启动：
 
-## Build & test
+| 进程 | 说明 | 默认地址 |
+| --- | --- | --- |
+| Agent Service | 后端（Express，仅本机） | `http://127.0.0.1:41731` |
+| Web（Vite） | 前端开发服务器 | 终端里打印的本地地址（常见为 `http://127.0.0.1:5173`） |
 
-```bash
-npm run build
-npm test
+保持该终端窗口运行，不要关闭。
+
+### 4. 打开界面
+
+1. 用浏览器打开 Vite 提示的前端地址（例如 `http://127.0.0.1:5173`）。
+2. 顶部服务状态应变为在线（会请求 `http://127.0.0.1:41731/api/health`）。
+3. 若显示离线：确认 `npm run dev` 仍在运行，且端口 `41731` 未被占用。
+
+可选健康检查（另开一个终端即可，不必在仓库目录）：
+
+```powershell
+curl http://127.0.0.1:41731/api/health
+```
+
+### 5. 首次配置（界面内）
+
+1. 打开左侧 **Connections**（连接）。
+2. 添加 OpenAI 兼容模型连接，填入 Base URL / Model；API Key 写入 **Windows 凭据管理器**，不会进普通配置文件。
+3. 打开 **Projects**，创建 Project，授权本机某个**真实工作目录**（例如 `D:\projects\my-paper`）。后续代理只能在该目录边界内工作。
+4. 按需检查 **Agents / Roles**（Firstmate、执行代理、Reviewer 等）。
+
+### 6. 日常：Todo 闭环（调研 / 课设 / 改代码）
+
+1. 左侧进入 **Todos**。
+2. 新建 Todo，写清目标（例如「修复登录超时」「写课设 demo」）。
+3. 等待 / 触发生成计划 → 在计划面板核对步骤与验证命令 → **批准计划**。
+4. 批准后系统可自动创建子任务并启动执行代理（也可手动点执行）。
+5. 在 Run 时间线查看日志、Diff、审查结果。
+6. 代码任务：在 Worktree 面板查看 Diff → 验证 → **接受应用** 或 **放弃**（不会自动 `git push`）。
+7. 审查通过后，由你 **验收**，Todo 才算完成。
+
+### 7. 日常：报告 / 论文（文档工作流）
+
+1. 启动本机 **Zotero**（需要读文献时）；需要自动写 DOCX 时确认 **OfficeCLI** 在 PATH 或设置了 `PAW_OFFICECLI_PATH`。
+2. 浏览器打开工作台，左侧进入 **文档工作流**（地址也可为 `#/documents`）。
+3. 填写：
+   - **工作区路径**：Project 的绝对路径（与 Projects 里授权的目录一致，例如 `D:\projects\my-paper`）
+   - 题目、任务要求、文档类型
+   - 引用模式：动态 Zotero（推荐）或静态
+   - （可选）Zotero Collection
+4. 按页面按钮顺序执行：
+   1. 创建文档任务  
+   2. 收集 Zotero 文献  
+   3. 生成提纲  
+   4. **批准提纲**（未批准不能写正文 / 生成终稿）  
+   5. 分章写作  
+   6. OfficeCLI 生成 DOCX  
+   7. 审查  
+   8. 引用定稿 → 导出清单与报告  
+5. 用 Word 打开生成的 DOCX，插入/刷新 Zotero 动态引用并排版保存。
+6. 回到工作台点 **刷新文件状态**，登记人工版本。
+
+产物一般在工作区下：
+
+```text
+<你的 Project 目录>\
+  .workbench\document-runs\<jobId>\   # 提纲、草稿、manifest、预览
+  artifacts\                          # DOCX、引用清单、审查报告等
+```
+
+### 8. 停止开发服务
+
+在运行 `npm run dev` 的终端按 `Ctrl+C` 结束。
+
+### 9. 构建、测试（可选）
+
+仍在 **仓库根目录** `workbench`：
+
+```powershell
+# 全量 TypeScript 检查
 npm run typecheck
-```
 
-文档工作流定向测试示例：
+# 全量测试
+npm test
 
-```bash
+# 构建 service + web + tray
+npm run build
+
+# 文档工作流相关定向测试
 npx vitest run apps/service/src/officecli apps/service/src/zotero apps/service/src/documentWorkflow
-```
 
-可选发布门禁（不依赖真实 API Key / Codex / OfficeCLI / Zotero 登录）：
-
-```bash
+# 发布门禁（不依赖真实 Key / Codex / OfficeCLI / Zotero）
 npm run release-gate
 ```
 
-## Windows install (optional)
+### 10. 安装为 Windows 本机程序（可选）
+
+仍在 **仓库根目录**，先构建再安装：
 
 ```powershell
 npm run build
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\Install-PersonalAIWorkbench.ps1
 ```
 
-| Path | Purpose |
+| 路径 | 用途 |
 | --- | --- |
-| `%LOCALAPPDATA%\Programs\PersonalAIWorkbench` | 程序 |
+| `%LOCALAPPDATA%\Programs\PersonalAIWorkbench` | 程序文件 |
 | `%LOCALAPPDATA%\PersonalAIWorkbench` | 数据（卸载默认保留） |
 
-托盘：
+用托盘托管服务（安装后常用）：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\TrayHost.ps1
 ```
 
-## Usage
+托盘启动后，浏览器访问安装脚本 / 托盘提示的本机地址（服务仍为 `127.0.0.1`，默认端口 `41731`）。
 
-1. 启动：`npm run dev` 或安装后用托盘启动服务。
-2. 在界面配置 OpenAI 兼容模型连接（Key 存凭据管理器）。
-3. 创建 Project，授权本机工作目录。
-4. 创建 Todo → 查看并批准计划 → 系统自动调度执行（也可手动启动代理）。
-5. 查看时间线、Diff、审查报告 → 验收交付物；代码修改可「接受应用」或「放弃」。
+### 11. 常用命令速查
 
-### 写报告 / 论文
+所有 `npm` 命令都在 **仓库根目录** 执行：
 
-1. 启动 Zotero（本机 API）与可选 OfficeCLI。
-2. 打开 PWA → **文档工作流**。
-3. 填写 Project 工作区绝对路径、题目、任务要求、Zotero Collection、引用模式（动态 / 静态）。
-4. 按步骤：收集文献 → 生成并**批准提纲** → 分章写作 → 生成 DOCX → 审查 → 引用定稿 → 导出。
-5. 用 Word 打开草稿，插入/刷新 Zotero 动态引用后保存；回到工作台「刷新文件状态」登记人工版本。
+| 你想做什么 | 进入目录 | 命令 |
+| --- | --- | --- |
+| 第一次拿到代码 | 任意 → `cd workbench` | `git clone ...` 然后 `cd workbench` |
+| 装依赖 | `workbench` | `npm install` |
+| 开发启动 | `workbench` | `npm run dev` |
+| 构建 | `workbench` | `npm run build` |
+| 测试 | `workbench` | `npm test` |
+| 类型检查 | `workbench` | `npm run typecheck` |
+| 本机安装包脚本 | `workbench` | `npm run pack:windows` 或上面的 `Install-...ps1` |
+| 更新代码 | `workbench` | `git pull` 然后必要时再 `npm install` |
+
+### 12. 环境变量（可选）
+
+在启动服务前设置（PowerShell 当前会话示例）：
+
+```powershell
+$env:PAW_SERVICE_PORT = "41731"
+$env:PAW_DATA_DIR = "$env:LOCALAPPDATA\PersonalAIWorkbench"
+$env:PAW_OFFICECLI_PATH = "C:\Path\To\officecli.exe"
+# 若已构建前端并希望 service 同域托管 PWA：
+# $env:PAW_WEB_DIST = "D:\dev\workbench\apps\web\dist"
+npm run dev
+```
+
+### 13. 故障排查简表
+
+| 现象 | 处理 |
+| --- | --- |
+| `npm` 不是内部或外部命令 | 安装 Node.js 并**重开终端** |
+| 界面显示服务离线 | 确认根目录已 `npm run dev`；访问 `http://127.0.0.1:41731/api/health` |
+| 端口被占用 | 改 `PAW_SERVICE_PORT` 或结束占用 41731 的进程 |
+| Zotero 收集失败 | 打开 Zotero 桌面端，确认本地 API 可访问 |
+| OfficeCLI 生成失败 | 安装 OfficeCLI 或设置 `PAW_OFFICECLI_PATH`；确认工作区路径是绝对路径 |
+| 依赖装完仍报模块缺失 | 在根目录重新 `npm install`，不要只在 `apps/web` 里装 |
+
+---
+
+## Install（精简）
+
+```powershell
+git clone https://github.com/Logikinet/workbench.git
+cd workbench
+npm install
+```
+
+## Development（精简）
+
+```powershell
+# 必须在仓库根目录 workbench
+npm run dev
+```
+
+- 服务：`http://127.0.0.1:41731`（仅本机）
+- 前端：Vite 打印的本地地址（见终端输出）
+
+## Build & test（精简）
+
+```powershell
+npm run build
+npm test
+npm run typecheck
+```
+
+文档工作流定向测试：
+
+```powershell
+npx vitest run apps/service/src/officecli apps/service/src/zotero apps/service/src/documentWorkflow
+```
+
+发布门禁：
+
+```powershell
+npm run release-gate
+```
+
+## Windows install（精简）
+
+见上文 **§10**。托盘：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\TrayHost.ps1
+```
+
+## Usage（精简）
+
+完整步骤见 **「详细使用步骤」**。摘要：
+
+1. 根目录 `npm run dev` → 浏览器打开 Vite 地址。
+2. Connections 配置模型 → Projects 授权工作目录。
+3. Todos：批准计划 → 执行 → 审查 → 验收。
+4. 文档工作流：填工作区绝对路径 → 收集文献 → 批准提纲 → 写作 → DOCX → 审查 → Word 终排版。
 
 ## Project structure
 
