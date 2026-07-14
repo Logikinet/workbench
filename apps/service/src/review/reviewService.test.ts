@@ -140,7 +140,7 @@ describe("No-mistakes independent review loop", () => {
     expect((await todos.get(todoId)).status).toBe("awaiting_confirmation");
 
     const first = await reviews.performReview(run.id, { autoDispatchFix: true });
-    expect(first.review.status).toBe("changes_requested");
+    expect(first.review!.status).toBe("changes_requested");
     expect(first.fixDispatched).toBe(true);
     expect(fixDispatches).toHaveLength(1);
     expect(fixDispatches[0]).toContain("Firstmate 派发的审查修复任务");
@@ -149,7 +149,7 @@ describe("No-mistakes independent review loop", () => {
 
     // Thin evidence after auto fix still fails; auto dispatch must not fire again.
     const second = await reviews.performReview(run.id, { autoDispatchFix: true });
-    expect(second.review.status).toBe("changes_requested");
+    expect(second.review!.status).toBe("changes_requested");
     expect(second.fixDispatched).toBe(false);
     expect(second.run.reviewLoop?.autoFixCyclesUsed).toBe(1);
     await expect(reviews.dispatchFix(run.id)).rejects.toThrow(/fix cycle limit|authorize an additional fix/i);
@@ -160,7 +160,7 @@ describe("No-mistakes independent review loop", () => {
     expect(manual.continued).toBe(true);
     expect(manual.run.status).toBe("awaiting_review");
     const third = await reviews.performReview(run.id, { autoDispatchFix: false });
-    expect(third.review.status).toBe("passed");
+    expect(third.review!.status).toBe("passed");
     expect(third.run.status).toBe("awaiting_acceptance");
   });
 
@@ -223,8 +223,8 @@ describe("No-mistakes independent review loop", () => {
     await expect(reviews.accept(run.id, "用户想直接完成")).rejects.toThrow(/independent|awaiting acceptance/i);
 
     const reviewed = await reviews.performReview(run.id, { autoDispatchFix: false });
-    expect(reviewed.review.status).toBe("passed");
-    expect(reviewed.review.kind).toBe("independent");
+    expect(reviewed.review!.status).toBe("passed");
+    expect(reviewed.review!.kind).toBe("independent");
     expect(reviewed.run.status).toBe("awaiting_acceptance");
     expect((await todos.get(todoId)).status).toBe("awaiting_acceptance");
 
@@ -261,7 +261,7 @@ describe("No-mistakes independent review loop", () => {
     expect(rework.run.status).toBe("awaiting_review");
 
     const again = await reviews.performReview(run.id, { autoDispatchFix: false });
-    expect(again.review.status).toBe("passed");
+    expect(again.review!.status).toBe("passed");
     const accepted = await reviews.accept(run.id, "返工后接受。");
     expect(accepted.run.status).toBe("completed");
   });

@@ -39,6 +39,12 @@ import type { SkillService } from "../skills/skillService.js";
 import type { CapabilityRuntime } from "../skills/capabilityRuntime.js";
 import { mountMcpRoutes } from "../mcp/mcpRoutes.js";
 import type { McpService } from "../mcp/mcpService.js";
+import { createFirstmateRouter } from "../firstmate/firstmateRoutes.js";
+import type { FirstmateSelfManagementService } from "../firstmate/firstmateSelfManagementService.js";
+import { createSessionRouter } from "../sessions/sessionRoutes.js";
+import type { SessionService } from "../sessions/sessionService.js";
+import { createAutomationRouter } from "../automation/automationRoutes.js";
+import type { AutomationService } from "../automation/automationService.js";
 import type { ReviewService } from "../review/reviewService.js";
 import type { BackupService } from "../backup/backupService.js";
 import type { QueueConfigUpdate, RunQueueService } from "../queue/runQueueService.js";
@@ -78,6 +84,9 @@ export interface ServiceAppOptions {
   capabilityRuntime?: CapabilityRuntime;
   /** Task 24: MCP connections. */
   mcp?: McpService;
+  firstmate?: FirstmateSelfManagementService;
+  sessions?: SessionService;
+  automation?: AutomationService;
 }
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -151,7 +160,10 @@ export function createApp(options: ServiceAppOptions): Express {
         ...(options.subtasks ? (["subtask-dag"] as const) : []),
         ...(options.tools ? (["tools"] as const) : []),
         ...(options.skills ? (["skills"] as const) : []),
-        ...(options.mcp ? (["mcp"] as const) : [])
+        ...(options.mcp ? (["mcp"] as const) : []),
+        ...(options.firstmate ? (["firstmate"] as const) : []),
+        ...(options.sessions ? (["sessions"] as const) : []),
+        ...(options.automation ? (["automation"] as const) : [])
       ]
     });
   });
@@ -208,6 +220,21 @@ export function createApp(options: ServiceAppOptions): Express {
   // Task 24: MCP Server connections (secrets never returned).
   if (options.mcp) {
     mountMcpRoutes(app, options.mcp);
+  }
+
+  // Task 36: Firstmate self-management tools (no secrets).
+  if (options.firstmate) {
+    app.use(createFirstmateRouter({ firstmate: options.firstmate }));
+  }
+
+  // Task 41: sessions + tool cards.
+  if (options.sessions) {
+    app.use(createSessionRouter({ sessions: options.sessions }));
+  }
+
+  // Task 43: local cron/webhook automation (loopback + token).
+  if (options.automation) {
+    app.use(createAutomationRouter({ automation: options.automation, clientAddress }));
   }
 
   app.get("/api/queue/config", async (_request, response) => {
@@ -789,6 +816,11 @@ export function createApp(options: ServiceAppOptions): Express {
       const result = await options.reviews.performReview(request.params.runId, {
         autoDispatchFix: typeof autoDispatchFix === "boolean" ? autoDispatchFix : undefined
       });
+      // Task 28: review model unavailable → paused Run (no auto model switch / forged pass).
+      if (result.paused) {
+        response.status(503).json(result);
+        return;
+      }
       response.status(201).json(result);
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : "Unable to perform independent review." });

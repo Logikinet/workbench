@@ -340,6 +340,16 @@ export interface ReviewIndex {
   cycle?: number;
   /** Independent Reviewer role — never mutates artifacts. */
   role?: "reviewer";
+  /** Residual risks called out by the Reviewer (even on pass). */
+  residualRisks?: string[];
+  /** Human-readable Markdown report saved alongside structured findings. */
+  markdownReport?: string;
+  /** How the independent review was produced. */
+  reviewSource?: "rules" | "model" | "rules+model";
+  /** Reviewer Agent Role id when LLM review was used (separate from executor). */
+  modelRoleId?: string;
+  /** Reviewer model id when LLM review was used. */
+  modelId?: string;
 }
 
 export interface RunReviewLoop {
@@ -361,6 +371,11 @@ export interface StructuredReviewInput {
   fixScope?: string;
   findings: ReviewFinding[];
   cycle: number;
+  residualRisks?: string[];
+  markdownReport?: string;
+  reviewSource?: ReviewIndex["reviewSource"];
+  modelRoleId?: string;
+  modelId?: string;
 }
 
 export interface ApprovalRecord {
@@ -1760,7 +1775,12 @@ export class RunService {
       fixScope: input.fixScope?.trim() || undefined,
       findings: input.findings.map((finding) => ({ ...finding })),
       cycle: input.cycle,
-      role: "reviewer"
+      role: "reviewer",
+      residualRisks: input.residualRisks?.map((item) => item.trim()).filter(Boolean),
+      markdownReport: input.markdownReport?.trim() || undefined,
+      reviewSource: input.reviewSource,
+      modelRoleId: input.modelRoleId?.trim() || undefined,
+      modelId: input.modelId?.trim() || undefined
     };
     run.reviews.push(review);
     loop.latestReviewId = review.id;

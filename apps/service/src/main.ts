@@ -21,6 +21,10 @@ import { ToolRegistry } from "./tools/toolRegistry.js";
 import { SkillService } from "./skills/skillService.js";
 import { CapabilityRuntime } from "./skills/capabilityRuntime.js";
 import { McpService } from "./mcp/mcpService.js";
+import { FirstmateSelfManagementService } from "./firstmate/firstmateSelfManagementService.js";
+import { SessionService } from "./sessions/sessionService.js";
+import { AutomationService } from "./automation/automationService.js";
+import { AgentHomeService } from "./agentHome/agentHomeService.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -53,9 +57,32 @@ async function main(): Promise<void> {
   });
   const professionalAgents = new ProfessionalAgentService({ projects, todos, runs, roles, connections, queue });
   const codexCli = new CodexCliService({ projects, todos, runs, roles, worktrees, queue });
+  const modelRuntime = new ModelRuntime({
+    roles,
+    connections,
+    runHooks: {
+      recordLog: (runId, input) => runs.recordLog(runId, input),
+      pause: (runId, reason) => runs.transition(runId, "paused", reason)
+    }
+  });
+  const roleList = await roles.list();
+  const firstmateRole =
+    roleList.find((role) => /firstmate/i.test(role.name)) ??
+    roleList.find((role) => role.harness === "api" && role.enabled);
+  const secondmateRole =
+    roleList.find((role) => /secondmate/i.test(role.name)) ??
+    roleList.find((role) => role.id !== firstmateRole?.id && role.harness === "api" && role.enabled) ??
+    firstmateRole;
+  // Task 28: Reviewer model/role is configured separately from the executor Professional Agent.
+  const reviewerRole =
+    roleList.find((role) => /reviewer|no-mistakes|审查/i.test(role.name)) ??
+    roleList.find((role) => role.skills?.includes("code-review") && role.harness === "api" && role.enabled) ??
+    firstmateRole;
   const reviews = new ReviewService({
     runs,
     todos,
+    modelRuntime,
+    reviewerRoleId: reviewerRole?.id,
     dispatchFixAgent: async (runId, _instruction) => {
       const run = await runs.get(runId);
       if (run.execution.selectedAgent?.harness === "codex-cli") {
@@ -73,15 +100,6 @@ async function main(): Promise<void> {
     connections,
     appVersion: serviceVersion
   });
-  const modelRuntime = new ModelRuntime({ roles, connections });
-  const roleList = await roles.list();
-  const firstmateRole =
-    roleList.find((role) => /firstmate/i.test(role.name)) ??
-    roleList.find((role) => role.harness === "api" && role.enabled);
-  const secondmateRole =
-    roleList.find((role) => /secondmate/i.test(role.name)) ??
-    roleList.find((role) => role.id !== firstmateRole?.id && role.harness === "api" && role.enabled) ??
-    firstmateRole;
   const aiPlanning =
     firstmateRole && secondmateRole
       ? new AiPlanningService({
@@ -126,6 +144,28 @@ async function main(): Promise<void> {
     vault: new WindowsCredentialVault()
   });
 
+  const firstmate = new FirstmateSelfManagementService({
+    roles,
+    connections,
+    skills,
+    tools,
+    projects,
+    runs,
+    queue
+  });
+  const sessions = await SessionService.open(join(dataDirectory, "sessions.json"));
+  const automation = await AutomationService.open({
+    statePath: join(dataDirectory, "automation.json"),
+    todos,
+    runs
+  });
+  await automation.start();
+  const agentHomes = await AgentHomeService.open({
+    longTermRoot: join(dataDirectory, "agent-homes"),
+    tempRoot: join(dataDirectory, "agent-homes-temp")
+  });
+  void agentHomes;
+
   const webRoot = process.env.PAW_WEB_DIST?.trim() || undefined;
   const app = createApp({
     version: serviceVersion,
@@ -145,6 +185,9 @@ async function main(): Promise<void> {
     skills,
     capabilityRuntime,
     mcp,
+    firstmate,
+    sessions,
+    automation,
     reviews,
     backup,
     queue,

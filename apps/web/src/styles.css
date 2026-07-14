@@ -190,5 +190,39 @@ select { border: 1px solid #3a4b69; border-radius: 8px; padding: 10px 12px; colo
 .timeline li { padding-left: 6px; }
 .timeline li span, .timeline time { color: #94a3b8; font-size: .72rem; }
 .timeline li p { margin: 3px 0; }
-@media (max-width: 820px) { .todo-form, .todo-edit-panel, .run-create, .timeline-grid.compare, .connection-form, .role-form, .planning-edit-grid, .planning-details, .temporary-agent-form, .correction-form, .acceptance-actions { grid-template-columns: 1fr; } .todo-toolbar { align-items: flex-start; flex-direction: column; } }
+/* Task 41 — Session management + Tool Cards */
+.session-panel { display: grid; gap: 16px; }
+.session-filters, .session-create { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+.session-layout { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 16px; margin-top: 12px; }
+.session-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; align-content: start; max-height: 70vh; overflow: auto; }
+.session-list li button { width: 100%; text-align: left; display: grid; gap: 2px; }
+.session-list strong, .session-list span, .session-list small { display: block; }
+.session-list span, .session-list small { color: #b7c6dd; font-weight: 400; font-size: .85rem; }
+.session-detail { display: grid; gap: 12px; min-width: 0; }
+.session-detail-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.session-detail-meta h3, .session-detail-meta p { margin: 0; }
+.session-detail-meta p { color: #b7c6dd; }
+.session-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.session-composer { display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.session-composer textarea { grid-column: 1 / -1; min-height: 72px; border: 1px solid #3a4b69; border-radius: 8px; padding: 10px 12px; color: #eff6ff; background: #101826; font: inherit; resize: vertical; }
+.tool-cards { display: grid; gap: 10px; max-height: 55vh; overflow: auto; padding-right: 4px; }
+.tool-cards-virtual-hint { margin: 0; color: #94a3b8; font-size: .85rem; }
+.session-card { padding: 12px; border: 1px solid #2b3b58; border-radius: 10px; background: #0f1b2d; }
+.session-card-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.session-card-header .tag { border-radius: 999px; padding: 2px 8px; background: #334155; color: #d7e0ef; font-size: .72rem; }
+.session-card-body pre, .session-card-text { margin: 0; white-space: pre-wrap; word-break: break-word; color: #e2e8f0; font: inherit; }
+.session-card-summary { margin: 0; color: #94a3b8; }
+.session-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: center; }
+.session-card-actions textarea { width: 100%; min-height: 48px; border: 1px solid #3a4b69; border-radius: 8px; padding: 8px 10px; color: #eff6ff; background: #101826; font: inherit; }
+.tool-card { display: grid; gap: 6px; }
+.tool-card-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.tool-card-title-row .tag { border-radius: 999px; padding: 2px 8px; background: #1e3a5f; color: #7dd3fc; font-size: .72rem; }
+.tool-card-completed .tool-card-title-row .tag:first-of-type { background: #14532d; color: #a7f3d0; }
+.tool-card-failed .tool-card-title-row .tag:first-of-type { background: #9f1239; color: #fee2e2; }
+.tool-card-args, .tool-card-output { margin: 0; color: #b7c6dd; font-size: .9rem; }
+.tool-card-args span, .tool-card-output span { color: #7dd3fc; margin-right: 6px; font-weight: 700; }
+.tool-card-links { margin: 4px 0 0; padding-left: 18px; color: #dce8f8; font-size: .88rem; }
+.ask-card-inline, .acceptance-card-inline { display: grid; gap: 6px; }
+.ask-card-inline p, .acceptance-card-inline p { margin: 0; }
+@media (max-width: 820px) { .todo-form, .todo-edit-panel, .run-create, .timeline-grid.compare, .connection-form, .role-form, .planning-edit-grid, .planning-details, .temporary-agent-form, .correction-form, .acceptance-actions, .session-layout, .session-composer { grid-template-columns: 1fr; } .todo-toolbar { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 640px) { .project-list li, .section-heading { align-items: flex-start; flex-direction: column; } .project-actions { flex-wrap: wrap; } }
