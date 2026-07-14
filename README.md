@@ -1,48 +1,33 @@
 # Personal AI Workbench
 
-Windows 本地个人 AI 工作台：你把任务丢进去，代理在本机帮你调研、写材料、做课设/写代码，你负责批计划和验收。服务只跑在本机，不暴露到公网。
+Windows 本地个人 AI 工作台。把 Todo 交给代理：先出计划、你批准后再在本机执行；可调研、写论文/报告、做课设、改代码；做完经独立审查，再由你验收。服务只监听 `127.0.0.1`，不暴露到公网。
 
 ## What it can do
 
-### 从「交任务」到「交作业」
+### 从交任务到交成果
 
-你平时可以这样用：
-
-1. **丢一条 Todo**  
-   例如：「帮我调研某课题并写一篇课程论文」「做完这个课设，要求能跑通 demo」「把这个小功能补上并写说明」。
-2. **系统先出计划给你看**  
-   会拆成调研 / 大纲 / 撰写 / 改代码 / 自测等步骤，标清验收标准和风险；你批准后才真正动手，批之前不会乱改你的正式文件。
-3. **在本机工作区自动干活**  
-   代理在你指定的文件夹里读资料、写文档、改代码、生成交付物（论文草稿、报告、代码、说明等），过程都能在时间线里看到。
-4. **自己审查一遍再让你验收**  
-   代理自称做完不算完：会对照目标和计划做审查，不过可以修一轮；最后由你点接受，任务才算完成。
-5. **中途可插手**  
-   随时暂停、停止、纠偏方向；危险操作（删文件、出目录等）会先问你；电脑关机或服务挂了，长任务还能按检查点接着做。
+1. **新建 Todo** — 例如调研课题、写课程论文、做课设 demo、修 bug。
+2. **先看计划再批准** — 拆步骤、验收标准与风险；批准前不改正式文件。
+3. **本机自动执行** — 在你授权的项目目录里读资料、写文档、改代码；代码类任务可用 Codex + Git Worktree 隔离修改。
+4. **独立审查 + 你验收** — 审查不过可自动修一轮；你确认后才算完成。
+5. **可中途介入** — 暂停、停止、纠偏；危险操作需确认；中断后可按检查点恢复。
 
 ### 典型场景
 
-| 你想干什么 | 工作台怎么帮你 |
+| 场景 | 能力 |
 | --- | --- |
-| **自动调研** | 按题目拆调研计划，在工作区整理笔记、提纲、资料摘要，形成可继续写的底稿 |
-| **写论文 / 课程报告** | 从大纲到分节撰写、改结构、补说明；产出落在本机目录，方便你再改再交 |
-| **做课设 / 大作业** | 绑定课设文件夹；写代码、补 README、跑测试或构建；Git 项目可在隔离区改，不满意整单放弃 |
-| **修 bug / 加功能** | 接 Codex 等编码代理在项目里改；看 Diff 和检查结果，过了你再收 |
-| **多门课 / 多个项目并行管** | 多个 Project + Todo 看板；同一任务可多次重跑，历史不互相覆盖 |
-| **换电脑接着干** | 备份任务与配置（不含密钥和大仓库），恢复后重新关联本地文件夹 |
+| 调研 | 证据优先的检索与摘录，产出 `research.md` / 来源清单 |
+| 论文 / 报告 | 提纲批准后分章写作，引用可回溯，导出 Markdown / DOCX / PDF |
+| 课设 / 大作业 | 任务书拆解、评分点映射、测试证据、交付 ZIP |
+| 写代码 | API 工具循环或 Codex CLI；Diff、验证、接受/放弃 Worktree |
+| 多项目管理 | Project + Todo 看板 + Run 历史 |
+| 本机运维 | 队列与资源护栏、备份迁移、托盘启停、Doctor / 自动化触发 |
 
-### 你需要准备什么
+### 不会默认做的事
 
-- 本机一个（或多个）项目文件夹：论文目录、课设仓库、作业目录等  
-- 自己的模型 API（OpenAI 兼容接口），Key 存在 Windows 凭据里  
-- 写代码时可选安装 Codex CLI  
-
-### 它不会替你做的事
-
-- 不会默认连公网当云端 SaaS，也不会把 Key 和仓库整包上传  
-- 不会在你没批计划、没过审查/验收时，把 Todo 直接标成「已完成」  
-- 不会在恢复中断任务时，自动重放删除、覆盖、外发这类危险操作  
-
-底层还包含：本地 PWA、角色与权限、Worktree/Diff、队列与资源保护、托盘安装等，保证上面这些场景在本机可控地跑完。
+- 不把 API Key 写入普通配置或备份（Windows 凭据管理器）
+- 不在未批准计划 / 未审查验收时把任务标成完成
+- 不自动 `git push`；恢复任务时不自动重放危险操作
 
 ## Requirements
 
@@ -65,88 +50,86 @@ npm install
 npm run dev
 ```
 
-- API：`http://127.0.0.1:41731`
-- 前端由 Vite 开发服务器启动（`apps/web`）
+- 服务：`http://127.0.0.1:41731`（仅本机）
+- 前端：Vite 开发服务器（`apps/web`）
 
-浏览器打开前端地址即可使用。服务只接受本机连接。
-
-## Build
+## Build & test
 
 ```bash
 npm run build
-```
-
-## Test
-
-```bash
 npm test
 npm run typecheck
 ```
 
-## Windows install (optional)
+可选发布门禁（不依赖真实 API Key / Codex 登录）：
 
-将构建结果安装到本机（托盘、快捷方式、开机自启等）：
+```bash
+npm run release-gate
+```
+
+## Windows install (optional)
 
 ```powershell
 npm run build
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\Install-PersonalAIWorkbench.ps1
 ```
 
-默认路径：
-
 | Path | Purpose |
 | --- | --- |
 | `%LOCALAPPDATA%\Programs\PersonalAIWorkbench` | 程序 |
-| `%LOCALAPPDATA%\PersonalAIWorkbench` | 数据 |
+| `%LOCALAPPDATA%\PersonalAIWorkbench` | 数据（卸载默认保留） |
 
-启动托盘：
+托盘：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\windows\TrayHost.ps1
 ```
 
-卸载脚本见 `packaging/windows/Uninstall-PersonalAIWorkbench.ps1`。默认不会删除 Project 工作区与数据，除非显式确认。
+## Usage
+
+1. 启动：`npm run dev` 或安装后用托盘启动服务。
+2. 在界面配置 OpenAI 兼容模型连接（Key 存凭据管理器）。
+3. 创建 Project，授权本机工作目录。
+4. 创建 Todo → 查看并批准计划 → 系统自动调度执行（也可手动启动代理）。
+5. 查看时间线、Diff、审查报告 → 验收交付物；代码修改可「接受应用」或「放弃」。
 
 ## Project structure
 
 ```text
 apps/
-  service/   # local Agent Service (Express)
-  web/       # PWA frontend
-  tray/      # tray / process helpers
+  service/     # 本地 Agent Service（Express）
+  web/         # PWA 前端
+  tray/        # 托盘与进程管理
 packaging/
-  windows/   # install / upgrade / uninstall scripts
+  windows/     # 安装 / 升级 / 卸载脚本
+scripts/
+  e2e/         # 发布门禁
+reports/       # 验收报告输出
+docs/
+  nextclaw-reference/  # 架构参考说明（非依赖）
 ```
 
 ## Configuration
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `PAW_SERVICE_PORT` | Service port | `41731` |
-| `PAW_DATA_DIR` | Data directory | `%LOCALAPPDATA%\PersonalAIWorkbench` |
-| `PAW_WEB_DIST` | Built web assets for same-origin serving | — |
+| `PAW_SERVICE_PORT` | 服务端口 | `41731` |
+| `PAW_DATA_DIR` | 数据目录 | `%LOCALAPPDATA%\PersonalAIWorkbench` |
+| `PAW_WEB_DIST` | 同域托管的前端构建目录 | — |
 
-模型连接、Role、队列、备份等在应用界面中配置。
-
-## Usage overview
-
-1. 启动服务与前端（`npm run dev`，或安装后用托盘启动）。
-2. 配置你自己的模型 API。
-3. 新建 Project，选中论文/课设/代码所在文件夹并授权。
-4. 新建 Todo，写清楚要调研什么、写什么、做到什么程度。
-5. 看计划 → 批准 → 等代理在本机执行 → 看审查结果 → 你验收交付物。
-6. 代码课设可看 Diff / 测试结果；不满意可放弃本次修改再重跑。
+模型、Role、队列、备份、MCP 等在应用界面中配置。
 
 ## Scripts
 
 | Command | Description |
 | --- | --- |
-| `npm run dev` | Start service + web in development |
-| `npm run build` | Build service, web, and tray |
-| `npm test` | Run tests |
-| `npm run typecheck` | TypeScript check |
-| `npm run pack:windows` | Run Windows install script |
+| `npm run dev` | 开发模式启动 service + web |
+| `npm run build` | 构建 service、web、tray |
+| `npm test` | 运行测试 |
+| `npm run typecheck` | TypeScript 检查 |
+| `npm run pack:windows` | 运行 Windows 安装脚本 |
+| `npm run release-gate` | CI 安全路径的发布门禁检查 |
 
 ## License
 
-No license file is included yet. Add a `LICENSE` if you plan to distribute the project.
+仓库暂未附带 `LICENSE`。若需开源分发，请自行补充许可证文件。

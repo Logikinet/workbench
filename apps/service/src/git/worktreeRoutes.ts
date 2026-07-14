@@ -26,6 +26,8 @@ export interface WorktreeApplyRouteRuns {
   get(runId: string): Promise<{
     status: string;
     execution: { status: string; terminationUnconfirmed?: boolean };
+    reviews?: unknown[];
+    reviewLoop?: unknown;
   }>;
   /** Optional: mark artifacts after successful apply (main agent may wire Run helpers). */
   markWorktreeArtifactsApplied?(runId: string, input: {
@@ -33,6 +35,8 @@ export interface WorktreeApplyRouteRuns {
     commitMessage?: string;
   }): Promise<unknown>;
   markWorktreeArtifactsDiscarded?(runId: string): Promise<unknown>;
+  /** Task 29: optional review+accept gate before applying worktree to main. */
+  canApplyWorktree?(runId: string): Promise<{ ok: boolean; reason?: string }>;
 }
 
 export interface WorktreeApplyRouteDeps {
@@ -59,6 +63,14 @@ export function registerWorktreeApplyRoutes(app: Express, deps: WorktreeApplyRou
           return response.status(409).json({
             error: "An active or unconfirmed execution must stop before worktree changes can be applied."
           });
+        }
+        if (deps.runs.canApplyWorktree) {
+          const gate = await deps.runs.canApplyWorktree(request.params.runId);
+          if (!gate.ok) {
+            return response.status(409).json({
+              error: gate.reason ?? "独立审查通过并经用户验收后，才能将 Worktree 应用到主工作区。"
+            });
+          }
         }
       }
       const commitMessage = typeof request.body?.commitMessage === "string"

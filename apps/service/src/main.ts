@@ -25,6 +25,17 @@ import { FirstmateSelfManagementService } from "./firstmate/firstmateSelfManagem
 import { SessionService } from "./sessions/sessionService.js";
 import { AutomationService } from "./automation/automationService.js";
 import { AgentHomeService } from "./agentHome/agentHomeService.js";
+import { orchestrateAfterPlanApproval } from "./orchestration/postPlanOrchestrator.js";
+import { DoctorService } from "./doctor/doctorService.js";
+import { createDoctorRouter } from "./doctor/doctorRoutes.js";
+import { ArtifactBrowserService } from "./artifacts/artifactBrowserService.js";
+import { createArtifactRouter } from "./artifacts/artifactRoutes.js";
+import { ResearchService } from "./research/researchService.js";
+import { DocumentService } from "./documents/documentService.js";
+import { CourseworkService } from "./coursework/courseworkService.js";
+import { PluginService } from "./plugins/pluginService.js";
+import { DeterministicRoutingService } from "./routing/deterministicRoutingService.js";
+import { ConnectionModelProvider } from "./model/connectionProvider.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -78,19 +89,8 @@ async function main(): Promise<void> {
     roleList.find((role) => /reviewer|no-mistakes|审查/i.test(role.name)) ??
     roleList.find((role) => role.skills?.includes("code-review") && role.harness === "api" && role.enabled) ??
     firstmateRole;
-  const reviews = new ReviewService({
-    runs,
-    todos,
-    modelRuntime,
-    reviewerRoleId: reviewerRole?.id,
-    dispatchFixAgent: async (runId, _instruction) => {
-      const run = await runs.get(runId);
-      if (run.execution.selectedAgent?.harness === "codex-cli") {
-        return codexCli.start(runId, {});
-      }
-      return professionalAgents.start(runId, {});
-    }
-  });
+  // reviews constructed after subtasks (see below)
+
   const backup = createBackupService({
     dataDirectory,
     projects,
@@ -136,6 +136,20 @@ async function main(): Promise<void> {
   const subtasks = await SubtaskDagService.open(join(dataDirectory, "subtasks.json"), {
     roleRouter
   });
+  const reviews = new ReviewService({
+    runs,
+    todos,
+    modelRuntime,
+    reviewerRoleId: reviewerRole?.id,
+    subtasks,
+    dispatchFixAgent: async (runId, _instruction) => {
+      const run = await runs.get(runId);
+      if (run.execution.selectedAgent?.harness === "codex-cli") {
+        return codexCli.start(runId, {});
+      }
+      return professionalAgents.start(runId, {});
+    }
+  });
   const tools = await ToolRegistry.open({ statePath: join(dataDirectory, "tools.json") });
   const skills = await SkillService.open({ statePath: join(dataDirectory, "skills.json") });
   const capabilityRuntime = new CapabilityRuntime({ skills, tools });
@@ -164,7 +178,60 @@ async function main(): Promise<void> {
     longTermRoot: join(dataDirectory, "agent-homes"),
     tempRoot: join(dataDirectory, "agent-homes-temp")
   });
+  // Agent Home is used when composing role instructions (execution can load via roleId).
+  // Keep reference on process for tooling; execution path uses ensureLongTermHome on demand.
+
+  const doctor = new DoctorService({
+    version: serviceVersion,
+    dataDirectory,
+    port,
+    connections,
+    codex: codexCli,
+    mcp
+  });
+  const artifacts = await ArtifactBrowserService.open({
+    catalogPath: join(dataDirectory, "artifacts.json"),
+    projects,
+    runs
+  });
+  const research = await ResearchService.open({
+    statePath: join(dataDirectory, "research.json")
+  });
+  const documents = await DocumentService.open({
+    statePath: join(dataDirectory, "documents.json"),
+    model: new ConnectionModelProvider(connections),
+    exportDir: join(dataDirectory, "document-exports")
+  });
+  const coursework = await CourseworkService.open({
+    statePath: join(dataDirectory, "coursework.json"),
+    model: new ConnectionModelProvider(connections),
+    packageDir: join(dataDirectory, "coursework-packages"),
+    subtasks,
+    research,
+    documents
+  });
+  const plugins = await PluginService.open({
+    statePath: join(dataDirectory, "plugins.json"),
+    installRoot: join(dataDirectory, "installed-plugins"),
+    coreVersion: serviceVersion,
+    vault: new WindowsCredentialVault()
+  });
+  const deterministicRouter = new DeterministicRoutingService({ roles, roleRouter });
+  // Prefer deterministic ordered rules for Firstmate routing while keeping RoleRouter inside.
+  void deterministicRouter;
+  // Agent homes available for role-scoped instruction composition.
   void agentHomes;
+
+  const postPlanOrchestrator = {
+    run: (run: Awaited<ReturnType<typeof runs.get>>) =>
+      orchestrateAfterPlanApproval(run, {
+        subtasks,
+        professionalAgents,
+        codexCli,
+        recordLog: (runId, input) => runs.recordLog(runId, input)
+      })
+  };
+
 
   const webRoot = process.env.PAW_WEB_DIST?.trim() || undefined;
   const app = createApp({
@@ -188,6 +255,13 @@ async function main(): Promise<void> {
     firstmate,
     sessions,
     automation,
+    postPlanOrchestrator,
+    doctor,
+    artifacts,
+    research,
+    documents,
+    coursework,
+    plugins,
     reviews,
     backup,
     queue,

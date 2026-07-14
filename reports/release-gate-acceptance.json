@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "personal-ai-workbench-release-gate",
-  "generatedAt": "2026-07-14T21:03:53.254Z",
+  "generatedAt": "2026-07-14T21:12:19.051Z",
   "ok": true,
   "ciSafe": true,
   "summary": {
@@ -56,8 +56,8 @@
       "code": "CREDENTIAL_VAULT_REDACTION_OK",
       "detail": "API keys stay in the credential vault only; public rows, connection index, backup snapshot, and log redaction helpers never expose the secret.",
       "meta": {
-        "connectionId": "ad2d30f8-d549-478a-bc0e-d8106b8fb32c",
-        "credentialRef": "PersonalAIWorkbench:connection:ad2d30f8-d549-478a-bc0e-d8106b8fb32c",
+        "connectionId": "4967bdcb-88ac-433b-9320-cde036781387",
+        "credentialRef": "PersonalAIWorkbench:connection:4967bdcb-88ac-433b-9320-cde036781387",
         "credentialPresent": true,
         "vaultBackend": "memory"
       }

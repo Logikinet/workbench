@@ -1,6 +1,6 @@
 # Personal AI Workbench — Windows E2E Release Gate Acceptance Report
 
-- **Generated at:** 2026-07-14T21:03:53.254Z
+- **Generated at:** 2026-07-14T21:12:19.051Z
 - **Overall:** PASS
 - **CI-safe (no real OpenAI/Codex credentials required):** yes
 - **Summary:** pass=5 warn=0 fail=0 skip=0 total=5

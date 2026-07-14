@@ -12,3 +12,9 @@ Thumbs.db
 *.local
 coverage/
 .vitest/
+test-logs/
+TEMP/
+TEMP *
+TEMP-*
+CONTINUATION*.md
+*.tmp

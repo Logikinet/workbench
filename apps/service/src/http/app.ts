@@ -45,6 +45,8 @@ import { createSessionRouter } from "../sessions/sessionRoutes.js";
 import type { SessionService } from "../sessions/sessionService.js";
 import { createAutomationRouter } from "../automation/automationRoutes.js";
 import type { AutomationService } from "../automation/automationService.js";
+import { createDoctorRouter } from "../doctor/doctorRoutes.js";
+import { createArtifactRouter } from "../artifacts/artifactRoutes.js";
 import type { ReviewService } from "../review/reviewService.js";
 import type { BackupService } from "../backup/backupService.js";
 import type { QueueConfigUpdate, RunQueueService } from "../queue/runQueueService.js";
@@ -87,6 +89,17 @@ export interface ServiceAppOptions {
   firstmate?: FirstmateSelfManagementService;
   sessions?: SessionService;
   automation?: AutomationService;
+  /** After plan approval: DAG + auto-start executors (closes Partial on 20/21). */
+  postPlanOrchestrator?: {
+    run(run: import("../runs/runService.js").Run): Promise<unknown>;
+  };
+  doctor?: import("../doctor/doctorService.js").DoctorService;
+  artifacts?: import("../artifacts/artifactBrowserService.js").ArtifactBrowserService;
+  watchdog?: import("../watchdog/watchdogService.js").WatchdogService;
+  research?: import("../research/researchService.js").ResearchService;
+  documents?: import("../documents/documentService.js").DocumentService;
+  coursework?: import("../coursework/courseworkService.js").CourseworkService;
+  plugins?: import("../plugins/pluginService.js").PluginService;
 }
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -163,7 +176,15 @@ export function createApp(options: ServiceAppOptions): Express {
         ...(options.mcp ? (["mcp"] as const) : []),
         ...(options.firstmate ? (["firstmate"] as const) : []),
         ...(options.sessions ? (["sessions"] as const) : []),
-        ...(options.automation ? (["automation"] as const) : [])
+        ...(options.automation ? (["automation"] as const) : []),
+        ...(options.postPlanOrchestrator ? (["post-plan-orchestration"] as const) : []),
+        ...(options.doctor ? (["doctor"] as const) : []),
+        ...(options.artifacts ? (["artifacts"] as const) : []),
+        ...(options.watchdog ? (["watchdog"] as const) : []),
+        ...(options.research ? (["research"] as const) : []),
+        ...(options.documents ? (["documents"] as const) : []),
+        ...(options.coursework ? (["coursework"] as const) : []),
+        ...(options.plugins ? (["plugins"] as const) : [])
       ]
     });
   });
@@ -235,6 +256,14 @@ export function createApp(options: ServiceAppOptions): Express {
   // Task 43: local cron/webhook automation (loopback + token).
   if (options.automation) {
     app.use(createAutomationRouter({ automation: options.automation, clientAddress }));
+  }
+
+  if (options.doctor) {
+    app.use(createDoctorRouter({ doctor: options.doctor }));
+  }
+
+  if (options.artifacts) {
+    app.use(createArtifactRouter({ artifacts: options.artifacts }));
   }
 
   app.get("/api/queue/config", async (_request, response) => {
@@ -589,7 +618,15 @@ export function createApp(options: ServiceAppOptions): Express {
       runs: options.runs
         ? {
             get: (runId) => options.runs!.get(runId),
-            markWorktreeArtifactsDiscarded: (runId) => options.runs!.markWorktreeArtifactsDiscarded(runId)
+            markWorktreeArtifactsDiscarded: (runId) => options.runs!.markWorktreeArtifactsDiscarded(runId),
+            canApplyWorktree: async (runId) => {
+              if (!options.reviews?.canApplyWorktree) {
+                // Fall back: allow apply when no review service (tests)
+                return { ok: true };
+              }
+              const run = await options.runs!.get(runId);
+              return options.reviews.canApplyWorktree(run);
+            }
           }
         : undefined
     });
@@ -656,7 +693,18 @@ export function createApp(options: ServiceAppOptions): Express {
       return response.status(400).json({ error: "Plan decision and summary are required." });
     }
     try {
-      response.json(await options.runs.decidePlan(request.params.runId, { decision, summary }));
+      const run = await options.runs.decidePlan(request.params.runId, { decision, summary });
+      let orchestration: unknown;
+      if (decision === "approved" && options.postPlanOrchestrator) {
+        try {
+          orchestration = await options.postPlanOrchestrator.run(run);
+        } catch (error) {
+          orchestration = {
+            error: error instanceof Error ? error.message : "Post-plan orchestration failed."
+          };
+        }
+      }
+      response.json(orchestration ? { run, orchestration } : run);
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : "Unable to decide plan." });
     }
