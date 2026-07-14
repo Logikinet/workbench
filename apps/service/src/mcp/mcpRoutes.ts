@@ -16,11 +16,20 @@
  * Routes:
  * - GET    /api/mcp/connections
  * - POST   /api/mcp/connections
+ * - GET    /api/mcp/catalog
+ * - POST   /api/mcp/catalog/preview-install
+ * - POST   /api/mcp/catalog/install
  * - GET    /api/mcp/connections/:id
  * - PATCH  /api/mcp/connections/:id
  * - DELETE /api/mcp/connections/:id
  * - POST   /api/mcp/connections/:id/test
  * - GET    /api/mcp/connections/:id/tools
+ * - GET    /api/mcp/connections/:id/permissions
+ * - POST   /api/mcp/connections/:id/trust
+ * - POST   /api/mcp/connections/:id/revoke-trust
+ * - GET    /api/mcp/connections/:id/update-preview
+ * - POST   /api/mcp/connections/:id/update
+ * - POST   /api/mcp/connections/:id/rollback
  * - POST   /api/mcp/connections/:id/tools/:toolName/call
  * - GET    /api/mcp/role-bindings
  * - GET    /api/mcp/role-bindings/:roleId
@@ -48,6 +57,72 @@ export function mountMcpRoutes(app: Express, mcp: McpService): void {
     }
   });
 
+  app.get("/api/mcp/catalog", async (request, response) => {
+    try {
+      const tagsRaw = request.query.tags;
+      const tags =
+        typeof tagsRaw === "string"
+          ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
+          : Array.isArray(tagsRaw)
+            ? tagsRaw.flatMap((t) => String(t).split(",")).map((t) => t.trim()).filter(Boolean)
+            : undefined;
+      response.json(
+        mcp.searchCatalog({
+          query:
+            typeof request.query.q === "string"
+              ? request.query.q
+              : typeof request.query.query === "string"
+                ? request.query.query
+                : undefined,
+          tags,
+          recommendedOnly: request.query.recommended === "1" || request.query.recommended === "true",
+          notInstalledOnly: request.query.notInstalled === "1" || request.query.notInstalled === "true"
+        })
+      );
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to search MCP catalog.") });
+    }
+  });
+
+  app.post("/api/mcp/catalog/preview-install", (request, response) => {
+    try {
+      const catalogId = asString((request.body as { catalogId?: string; id?: string })?.catalogId)
+        ?? asString((request.body as { id?: string })?.id);
+      if (!catalogId) {
+        response.status(400).json({ error: "catalogId is required." });
+        return;
+      }
+      response.json(mcp.previewInstall(catalogId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to preview MCP install.") });
+    }
+  });
+
+  app.post("/api/mcp/catalog/install", async (request, response) => {
+    try {
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const catalogId = asString(body.catalogId) ?? asString(body.id);
+      if (!catalogId) {
+        response.status(400).json({ error: "catalogId is required." });
+        return;
+      }
+      if (body.confirm !== true) {
+        response.status(400).json({
+          error: "Install requires explicit user confirmation (confirm: true)."
+        });
+        return;
+      }
+      const installed = await mcp.installFromCatalog(catalogId, {
+        confirm: true,
+        env: asStringRecord(body.env),
+        authToken: asString(body.authToken)
+      });
+      response.status(201).json(toPublicMcpConnection(installed));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to install MCP from catalog.") });
+    }
+  });
+
   app.post("/api/mcp/connections", async (request, response) => {
     try {
       const created = await mcp.create(parseCreateBody(request.body));
@@ -71,6 +146,72 @@ export function mountMcpRoutes(app: Express, mcp: McpService): void {
       response.json(toPublicMcpConnection(updated));
     } catch (error) {
       response.status(400).json({ error: errorMessage(error, "Unable to update MCP connection.") });
+    }
+  });
+
+  app.get("/api/mcp/connections/:connectionId/permissions", async (request, response) => {
+    try {
+      response.json(await mcp.permissionSummary(request.params.connectionId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to load MCP permission summary.") });
+    }
+  });
+
+  app.post("/api/mcp/connections/:connectionId/trust", async (request, response) => {
+    try {
+      response.json(toPublicMcpConnection(await mcp.trust(request.params.connectionId)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to trust MCP connection.") });
+    }
+  });
+
+  app.post("/api/mcp/connections/:connectionId/revoke-trust", async (request, response) => {
+    try {
+      response.json(toPublicMcpConnection(await mcp.revokeTrust(request.params.connectionId)));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to revoke MCP trust.") });
+    }
+  });
+
+  app.get("/api/mcp/connections/:connectionId/update-preview", async (request, response) => {
+    try {
+      response.json(await mcp.previewUpdate(request.params.connectionId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to preview MCP update.") });
+    }
+  });
+
+  app.post("/api/mcp/connections/:connectionId/update", async (request, response) => {
+    try {
+      if ((request.body as { confirm?: boolean })?.confirm !== true) {
+        response.status(400).json({ error: "Update requires explicit user confirmation (confirm: true)." });
+        return;
+      }
+      response.json(
+        toPublicMcpConnection(await mcp.updateFromCatalog(request.params.connectionId, { confirm: true }))
+      );
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to update MCP from catalog.") });
+    }
+  });
+
+  app.post("/api/mcp/connections/:connectionId/rollback", async (request, response) => {
+    try {
+      const body = (request.body ?? {}) as { confirm?: boolean; version?: string };
+      if (body.confirm !== true) {
+        response.status(400).json({ error: "Rollback requires explicit user confirmation (confirm: true)." });
+        return;
+      }
+      response.json(
+        toPublicMcpConnection(
+          await mcp.rollback(request.params.connectionId, {
+            confirm: true,
+            version: typeof body.version === "string" ? body.version : undefined
+          })
+        )
+      );
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to rollback MCP connection.") });
     }
   });
 

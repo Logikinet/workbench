@@ -415,6 +415,98 @@ describe("Subtask DAG orchestration (Task 21)", () => {
     // failed tasks are not frontier; c not ready either
     expect(computeFrontierIds(subtasks)).toEqual([]);
   });
+
+  it("appendRemediationSubtasks creates constrained fix nodes and cancels prior incomplete remediation", async () => {
+    await service.createFromApprovedPlan({
+      runId: "run-rem",
+      planVersion: 1,
+      planApproved: true,
+      autoSchedule: false,
+      steps: ["实现功能", "验证"]
+    });
+    // Complete plan steps so remediation is additive.
+    await service.schedule("run-rem");
+    const plan = service.getByRunId("run-rem");
+    await service.completeSubtask("run-rem", plan.subtasks[0]!.id);
+    await service.completeSubtask("run-rem", plan.subtasks[1]!.id);
+
+    const first = await service.appendRemediationSubtasks({
+      runId: "run-rem",
+      reviewId: "rev-1",
+      cycle: 0,
+      autoSchedule: false,
+      explicitSubtasks: [
+        {
+          id: "remediation-c0-f0",
+          title: "修复：缺验证",
+          description: "仅修确认问题",
+          dependsOn: [],
+          acceptanceCriteria: ["验证 exitCode=0"],
+          inputs: ["evidence:无验证"],
+          accessMode: "write",
+          findingSeverity: "high"
+        },
+        {
+          id: "remediation-c0-verify",
+          title: "重新验证",
+          dependsOn: ["remediation-c0-f0"],
+          acceptanceCriteria: ["验证通过"],
+          accessMode: "write"
+        }
+      ],
+      agentAssignments: [{
+        subtaskId: "remediation-c0-f0",
+        agent: { name: "实现代理", source: "temporary", tools: ["filesystem"] }
+      }]
+    });
+
+    expect(first.createdIds).toEqual(expect.arrayContaining(["remediation-c0-f0", "remediation-c0-verify"]));
+    const afterFirst = service.getByRunId("run-rem");
+    const rem = afterFirst.subtasks.filter((s) => s.origin === "review_remediation");
+    expect(rem).toHaveLength(2);
+    expect(rem.find((s) => s.id === "remediation-c0-f0")?.agentInstance?.name).toBe("实现代理");
+    expect(rem.find((s) => s.id === "remediation-c0-f0")?.sourceReviewId).toBe("rev-1");
+    expect(rem.find((s) => s.id === "remediation-c0-verify")?.dependsOn).toContain("remediation-c0-f0");
+
+    // Second cycle cancels incomplete prior remediation
+    const second = await service.appendRemediationSubtasks({
+      runId: "run-rem",
+      reviewId: "rev-2",
+      cycle: 1,
+      autoSchedule: false,
+      explicitSubtasks: [{
+        id: "remediation-c1-f0",
+        title: "修复：仍缺成果",
+        dependsOn: [],
+        acceptanceCriteria: ["有 Artifact"]
+      }]
+    });
+    expect(second.cancelledIds).toEqual(expect.arrayContaining(["remediation-c0-f0", "remediation-c0-verify"]));
+    const afterSecond = service.getByRunId("run-rem");
+    const activeRem = afterSecond.subtasks.filter(
+      (s) => s.origin === "review_remediation" && s.status !== "cancelled"
+    );
+    expect(activeRem.map((s) => s.id)).toEqual(["remediation-c1-f0"]);
+  });
+
+  it("appendRemediationSubtasks creates a remediation-only DAG when none exists", async () => {
+    const result = await service.appendRemediationSubtasks({
+      runId: "run-only-rem",
+      reviewId: "rev-x",
+      planVersion: 2,
+      autoSchedule: true,
+      explicitSubtasks: [{
+        id: "remediation-c0-f0",
+        title: "修复问题",
+        dependsOn: [],
+        acceptanceCriteria: ["通过"]
+      }]
+    });
+    expect(result.created).toBe(true);
+    expect(result.dag.taskType).toBe("bug_fix");
+    expect(result.dag.subtasks[0]?.origin).toBe("review_remediation");
+    expect(result.dag.subtasks[0]?.status).toBe("running"); // auto-scheduled
+  });
 });
 
 function stubSubtask(overrides: Partial<Subtask> & Pick<Subtask, "id" | "status" | "dependsOn">): Subtask {

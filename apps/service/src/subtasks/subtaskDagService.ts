@@ -18,6 +18,8 @@ import { constants } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type {
+  AppendRemediationResult,
+  AppendRemediationSubtasksInput,
   CompleteSubtaskInput,
   CorrectionInput,
   CorrectionResult,
@@ -533,6 +535,145 @@ export class SubtaskDagService {
     return cloneSubtask(subtask);
   }
 
+  /**
+   * Task 29: append constrained fix subtasks from independent review findings.
+   * Creates a remediation-only DAG when none exists for the run.
+   * Cancels incomplete prior remediation nodes by default so only the current cycle is active.
+   */
+  async appendRemediationSubtasks(input: AppendRemediationSubtasksInput): Promise<AppendRemediationResult> {
+    if (!input.runId?.trim()) throw new Error("runId is required.");
+    if (!input.reviewId?.trim()) throw new Error("reviewId is required.");
+    if (!Array.isArray(input.explicitSubtasks) || input.explicitSubtasks.length === 0) {
+      throw new Error("At least one remediation subtask is required.");
+    }
+
+    const runId = input.runId.trim();
+    const reviewId = input.reviewId.trim();
+    const now = this.now().toISOString();
+    let created = false;
+    let dag = this.state.dags.find((entry) => entry.runId === runId);
+
+    if (!dag) {
+      created = true;
+      dag = {
+        id: randomUUID(),
+        runId,
+        planVersion: Number.isFinite(input.planVersion) && (input.planVersion as number) >= 1
+          ? (input.planVersion as number)
+          : 1,
+        taskType: "bug_fix",
+        complexity: "medium",
+        createdAt: now,
+        updatedAt: now,
+        status: "idle",
+        subtasks: [],
+        autoSchedule: input.autoSchedule !== false,
+        maxParallelWrite: 1,
+        maxParallelRead: 3,
+        maxParallelIndependentWrite: 2,
+        frontier: [],
+        needsAskReplan: false,
+        planApproved: true
+      };
+      this.state.dags.push(dag);
+    }
+
+    const cancelledIds: string[] = [];
+    if (input.cancelPriorRemediation !== false) {
+      for (const subtask of dag.subtasks) {
+        if (subtask.origin !== "review_remediation") continue;
+        if (subtask.status === "completed" || subtask.status === "cancelled") continue;
+        subtask.status = "cancelled";
+        subtask.blockedReason = `被新的审查修复循环取代（review ${reviewId}）。`;
+        subtask.completedAt = now;
+        cancelledIds.push(subtask.id);
+      }
+    }
+
+    const baseStep = dag.subtasks.reduce((max, s) => Math.max(max, s.stepIndex), -1) + 1;
+    const built = buildRemediationSubtasks({
+      runId,
+      planVersion: dag.planVersion,
+      reviewId,
+      cycle: input.cycle ?? 0,
+      stepBase: baseStep,
+      defs: input.explicitSubtasks,
+      now
+    });
+
+    // Reject duplicate ids against remaining active/completed nodes.
+    const existingIds = new Set(dag.subtasks.map((s) => s.id));
+    for (const subtask of built) {
+      if (existingIds.has(subtask.id) && !cancelledIds.includes(subtask.id)) {
+        // Replace cancelled same-id nodes; otherwise allocate a unique suffix.
+        const collision = dag.subtasks.find((s) => s.id === subtask.id);
+        if (collision && collision.status === "cancelled") {
+          // drop cancelled node so the new one can reuse the id
+          dag.subtasks = dag.subtasks.filter((s) => s.id !== subtask.id);
+        } else if (collision) {
+          subtask.id = `${subtask.id}-${randomUUID().slice(0, 8)}`;
+        }
+      }
+    }
+
+    dag.subtasks.push(...built);
+    const createdIds = built.map((s) => s.id);
+
+    if (input.agentAssignments?.length) {
+      for (const assignment of input.agentAssignments) {
+        const target = dag.subtasks.find(
+          (s) => s.id === assignment.subtaskId || s.routingInstanceId === assignment.subtaskId
+        );
+        if (!target) continue;
+        // Reviewer must never be assigned as a fix agent.
+        if (looksLikeReviewerAgent(assignment.agent)) continue;
+        target.agentInstance = { ...assignment.agent };
+      }
+    }
+
+    // Default unassigned remediation tasks get a placeholder fix agent name (not Reviewer).
+    for (const subtask of built) {
+      if (!subtask.agentInstance) {
+        subtask.agentInstance = {
+          name: "原专业代理（修复）",
+          source: "unassigned",
+          tools: ["filesystem", "shell"]
+        };
+      }
+    }
+
+    if (input.autoSchedule !== undefined) {
+      dag.autoSchedule = input.autoSchedule;
+    } else if (!dag.autoSchedule) {
+      dag.autoSchedule = true;
+    }
+    dag.needsAskReplan = false;
+    if (dag.status === "awaiting_replan" || dag.status === "paused" || dag.status === "failed" || dag.status === "completed") {
+      dag.status = "idle";
+    }
+    dag.updatedAt = now;
+    recomputeStatuses(dag);
+    refreshDagAggregate(dag);
+    await this.persist();
+
+    if (dag.autoSchedule && !dag.needsAskReplan) {
+      const scheduled = await this.schedule(runId);
+      return {
+        dag: scheduled.dag,
+        createdIds,
+        cancelledIds,
+        created
+      };
+    }
+
+    return {
+      dag: cloneDag(dag),
+      createdIds,
+      cancelledIds,
+      created
+    };
+  }
+
   private requireDag(runId: string): SubtaskDag {
     const dag = this.state.dags.find((entry) => entry.runId === runId);
     if (!dag) throw new Error(`Subtask DAG for run ${runId} was not found.`);
@@ -752,7 +893,8 @@ function buildFromSteps(input: CreateDagFromPlanInput & { steps: string[] }, _no
       status: "pending" as SubtaskStatus,
       artifacts: [],
       correctionNotes: [],
-      routingInstanceId: undefined
+      routingInstanceId: undefined,
+      origin: "plan"
     } satisfies Subtask;
   });
 }
@@ -799,9 +941,78 @@ function buildFromExplicit(input: CreateDagFromPlanInput, _now: string): Subtask
       status: "pending" as SubtaskStatus,
       artifacts: [],
       correctionNotes: [],
-      routingInstanceId: def.routingInstanceId
+      routingInstanceId: def.routingInstanceId,
+      origin: def.origin ?? "plan",
+      sourceReviewId: def.sourceReviewId,
+      findingSeverity: def.findingSeverity
     } satisfies Subtask;
   });
+}
+
+function buildRemediationSubtasks(input: {
+  runId: string;
+  planVersion: number;
+  reviewId: string;
+  cycle: number;
+  stepBase: number;
+  defs: ExplicitSubtaskDef[];
+  now: string;
+}): Subtask[] {
+  const idMap = new Map<string, string>();
+  input.defs.forEach((def, index) => {
+    const local = def.id?.trim() || `remediation-c${input.cycle}-${index + 1}`;
+    idMap.set(local, local);
+    idMap.set(String(index), local);
+  });
+
+  return input.defs.map((def, index) => {
+    const id = def.id?.trim() || `remediation-c${input.cycle}-${index + 1}`;
+    const accessMode: SubtaskAccessMode = def.accessMode ?? "write";
+    const caps = uniqueStrings(def.requiredCapabilities ?? ["filesystem", "workspace"]);
+    const permissions: SubtaskPermissions = {
+      ...defaultPermissions(accessMode, caps),
+      ...def.permissions,
+      workspace: def.permissions?.workspace ?? "project_only",
+      externalSend: false
+    };
+    const dependsOn = resolveDependsOn(def, index, idMap);
+    return {
+      id,
+      runId: input.runId,
+      planVersion: input.planVersion,
+      stepIndex: input.stepBase + index,
+      title: def.title.trim(),
+      description: def.description?.trim() || def.title.trim(),
+      requiredCapabilities: caps,
+      inputs: uniqueStrings(def.inputs ?? [`review:${input.reviewId}`]),
+      outputs: uniqueStrings(def.outputs ?? [`修复产出：${def.title}`]),
+      dependsOn,
+      permissions,
+      acceptanceCriteria: uniqueStrings(
+        def.acceptanceCriteria?.length ? def.acceptanceCriteria : [`完成：${def.title}`]
+      ),
+      accessMode,
+      independentWorktree: Boolean(def.independentWorktree),
+      status: "pending" as SubtaskStatus,
+      artifacts: [],
+      correctionNotes: [],
+      routingInstanceId: def.routingInstanceId ?? id,
+      origin: "review_remediation",
+      sourceReviewId: def.sourceReviewId ?? input.reviewId,
+      findingSeverity: def.findingSeverity
+    } satisfies Subtask;
+  });
+}
+
+function looksLikeReviewerAgent(agent: SubtaskAgentInstance): boolean {
+  const blob = [
+    agent.name,
+    agent.roleId ?? "",
+    ...(agent.skills ?? []),
+    ...(agent.tools ?? [])
+  ].join(" ").toLowerCase();
+  return /reviewer|no-mistakes|独立审查/.test(blob)
+    && !/fix|implement|实现|修复/.test(blob);
 }
 
 function resolveDependsOn(def: ExplicitSubtaskDef, index: number, idMap: Map<string, string>): string[] {

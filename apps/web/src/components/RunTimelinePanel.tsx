@@ -8,6 +8,7 @@ import { CodexHarnessPanel } from "./CodexHarnessPanel.js";
 import { GitWorktreePanel } from "./GitWorktreePanel.js";
 import { ReviewPanel } from "./ReviewPanel.js";
 import { CheckpointRecoveryPanel } from "./CheckpointRecoveryPanel.js";
+import { SubtaskDagPanel } from "./SubtaskDagPanel.js";
 
 interface RunTimelinePanelProps {
   serviceUrl: string;
@@ -81,11 +82,14 @@ export function RunTimelinePanel({ serviceUrl, todo, onClose, onTodoChange }: Ru
   };
 
   return (
-    <section className="run-panel" aria-labelledby="run-panel-title">
+    <section className="run-panel focused-run-panel" aria-labelledby="run-panel-title">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">RUN HISTORY</p>
+          <p className="eyebrow">TODO / RUN DETAIL</p>
           <h3 id="run-panel-title">{todo.title}</h3>
+          <p className="panel-lead mobile-priority-note">
+            聚焦时间线：对话、计划、AskUser、子任务、日志、Diff、审查与 Artifact。移动端可回答 AskUser 与批准/停止。
+          </p>
         </div>
         <button type="button" className="quiet-button" onClick={onClose}>关闭</button>
       </div>
@@ -146,11 +150,40 @@ function Timeline({
       </dl>
       <AskUserPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} readOnly={readOnly} />
       <PlanningApprovalPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} readOnly={readOnly} />
+      {!readOnly && (
+        <SubtaskDagPanel serviceUrl={serviceUrl} available={!readOnly} runId={run.id} onNotice={onNotice} />
+      )}
       {!readOnly && run.planning?.approvalStatus === "approved" && <ProfessionalAgentPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} />}
       {!readOnly && run.planning?.approvalStatus === "approved" && (run.execution.status === "idle" || run.execution.selectedAgent?.harness === "codex-cli") && <CodexHarnessPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} />}
       {!readOnly && <GitWorktreePanel serviceUrl={serviceUrl} run={run} onNotice={onNotice} />}
       <CheckpointRecoveryPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} readOnly={readOnly} />
       <ReviewPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} onTodoChange={onTodoChange} readOnly={readOnly} />
+      {run.artifacts.length > 0 && (
+        <div className="run-artifacts-index" aria-label="Artifacts">
+          <strong>Artifacts</strong>
+          <ul>
+            {run.artifacts.map((artifact) => (
+              <li key={artifact.id}>
+                <span className="tag">{artifact.kind}</span> {artifact.path}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {run.logs.length > 0 && (
+        <details className="run-logs-fold">
+          <summary>日志（{run.logs.length}，长日志折叠保护）</summary>
+          <ol className="run-logs-list">
+            {run.logs.slice(-200).map((log) => (
+              <li key={log.id}>
+                <span>{log.level}</span>
+                <p>{log.message}</p>
+              </li>
+            ))}
+          </ol>
+          {run.logs.length > 200 && <p className="muted-copy">仅显示最近 200 条。</p>}
+        </details>
+      )}
       <ol className="timeline">
         {run.timeline.map((event) => (
           <li key={event.id}><span>{event.kind}</span><p>{event.summary}</p><time>{new Date(event.createdAt).toLocaleString()}</time></li>

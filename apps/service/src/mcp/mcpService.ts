@@ -1,11 +1,20 @@
 /**
  * MCP connection service: create/test/enable/disable, tool discovery,
- * per-tool role bindings, policy-enforced calls, secret-free backup snapshot.
+ * per-tool role bindings, policy-enforced calls, secret-free backup snapshot,
+ * catalog install / trust / version / rollback (Task 40).
  */
 
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import {
+  buildMcpPermissionLines,
+  LocalMcpCatalogProvider,
+  previewConfigDiff,
+  resolveMcpInstallStatus,
+  searchMcpCatalog,
+  type McpCatalogProvider
+} from "./mcpCatalog.js";
 import {
   createDefaultMcpClientFactory,
   McpClientUnavailableError,
@@ -24,12 +33,19 @@ import {
   MCP_DEFAULT_TIMEOUT_MS,
   type CreateMcpConnectionInput,
   type McpCallContext,
+  type McpCatalogSearchQuery,
+  type McpCatalogSearchResult,
   type McpConnection,
+  type McpConnectionSnapshot,
   type McpConnectionStateSnapshot,
+  type McpInstallPreview,
+  type McpInstallRecord,
+  type McpPermissionSummary,
   type McpTestResult,
   type McpToolCallResult,
   type McpToolDescriptor,
   type McpToolRef,
+  type McpUpdatePreview,
   type McpVaultSecrets,
   type PublicMcpConnection,
   type RoleMcpBinding,
@@ -49,10 +65,11 @@ interface McpState {
   schemaVersion: 1;
   connections: McpConnection[];
   roleBindings: RoleMcpBinding[];
+  installs: Record<string, McpInstallRecord>;
 }
 
 function emptyState(): McpState {
-  return { schemaVersion: 1, connections: [], roleBindings: [] };
+  return { schemaVersion: 1, connections: [], roleBindings: [], installs: {} };
 }
 
 export interface McpServiceOptions {
@@ -61,24 +78,38 @@ export interface McpServiceOptions {
   clientFactory?: McpClientFactory;
   onUnavailable?: McpUnavailableHandler;
   defaultTimeoutMs?: number;
+  catalog?: McpCatalogProvider;
+  /**
+   * When true (default), catalog-sourced connections require trust before tool calls.
+   * Manual connections default to trusted for backward compatibility with Task 24.
+   */
+  requireTrustForCatalog?: boolean;
 }
+
+const MAX_HISTORY = 10;
 
 export class McpService {
   private state: McpState = emptyState();
   private readonly clientFactory: McpClientFactory;
   private readonly defaultTimeoutMs: number;
+  private readonly catalog: McpCatalogProvider;
+  private readonly requireTrustForCatalog: boolean;
 
   private constructor(
     private readonly statePath: string,
     state: McpState,
     private readonly vault: CredentialVault,
     clientFactory: McpClientFactory | undefined,
-    private readonly onUnavailable?: McpUnavailableHandler,
-    defaultTimeoutMs?: number
+    private readonly onUnavailable: McpUnavailableHandler | undefined,
+    defaultTimeoutMs: number | undefined,
+    catalog: McpCatalogProvider | undefined,
+    requireTrustForCatalog: boolean | undefined
   ) {
     this.state = state;
     this.clientFactory = clientFactory ?? createDefaultMcpClientFactory();
     this.defaultTimeoutMs = defaultTimeoutMs ?? MCP_DEFAULT_TIMEOUT_MS;
+    this.catalog = catalog ?? new LocalMcpCatalogProvider();
+    this.requireTrustForCatalog = requireTrustForCatalog !== false;
   }
 
   static async open(options: McpServiceOptions): Promise<McpService> {
@@ -93,7 +124,11 @@ export class McpService {
         connections: (decoded.connections as McpConnection[]).map(normalizeConnection),
         roleBindings: Array.isArray(decoded.roleBindings)
           ? (decoded.roleBindings as RoleMcpBinding[]).map(normalizeBinding)
-          : []
+          : [],
+        installs:
+          decoded.installs && typeof decoded.installs === "object" && !Array.isArray(decoded.installs)
+            ? (decoded.installs as Record<string, McpInstallRecord>)
+            : {}
       };
     } catch (error: unknown) {
       if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -108,7 +143,9 @@ export class McpService {
       options.vault,
       options.clientFactory,
       options.onUnavailable,
-      options.defaultTimeoutMs
+      options.defaultTimeoutMs,
+      options.catalog,
+      options.requireTrustForCatalog
     );
   }
 
@@ -119,7 +156,7 @@ export class McpService {
   }
 
   async listPublic(): Promise<PublicMcpConnection[]> {
-    return (await this.list()).map(toPublicMcpConnection);
+    return (await this.list()).map((connection) => this.toPublic(connection));
   }
 
   async get(connectionId: string): Promise<McpConnection> {
@@ -129,7 +166,17 @@ export class McpService {
   }
 
   async getPublic(connectionId: string): Promise<PublicMcpConnection> {
-    return toPublicMcpConnection(await this.get(connectionId));
+    return this.toPublic(await this.get(connectionId));
+  }
+
+  private toPublic(connection: McpConnection): PublicMcpConnection {
+    const catalog = connection.catalogId ? this.catalog.get(connection.catalogId) : undefined;
+    const base = toPublicMcpConnection(connection);
+    return {
+      ...base,
+      trusted: connection.trusted === true,
+      installStatus: resolveMcpInstallStatus(connection, catalog)
+    };
   }
 
   async create(input: CreateMcpConnectionInput): Promise<McpConnection> {
@@ -159,6 +206,11 @@ export class McpService {
       url: input.url?.trim() || undefined,
       credentialRef,
       credentialPresent: false,
+      source: "manual",
+      // Manual Task-24 connections are operator-created → trusted by default.
+      trusted: true,
+      trustedAt: now,
+      version: "1.0.0",
       createdAt: now,
       updatedAt: now
     };
@@ -446,6 +498,19 @@ export class McpService {
       };
     }
 
+    if (this.isTrustRequired(connection) && connection.trusted !== true) {
+      return {
+        ok: false,
+        connectionId,
+        toolName: safeName,
+        kind: "untrusted",
+        message:
+          "MCP 连接尚未建立信任记录。请先查看权限摘要并确认 trust，未知 Server 不会静默执行。",
+        pauseRelatedSubtasks: false,
+        durationMs: Date.now() - started
+      };
+    }
+
     if (context.roleId) {
       const binding = await this.getRoleBindings(context.roleId);
       const allowed = binding.tools.some(
@@ -600,7 +665,8 @@ export class McpService {
       schemaVersion: 1,
       secretsExcluded: true,
       connections: this.state.connections.map((entry) => toBackupConnectionRow(entry)),
-      roleBindings: this.state.roleBindings.map((entry) => structuredClone(entry))
+      roleBindings: this.state.roleBindings.map((entry) => structuredClone(entry)),
+      installs: structuredClone(this.state.installs)
     };
   }
 
@@ -624,9 +690,271 @@ export class McpService {
       ),
       roleBindings: Array.isArray(snapshot.roleBindings)
         ? snapshot.roleBindings.map(normalizeBinding)
-        : []
+        : [],
+      installs:
+        snapshot.installs && typeof snapshot.installs === "object"
+          ? structuredClone(snapshot.installs)
+          : {}
     };
     await this.persist();
+  }
+
+  // ── Task 40 catalog lifecycle ───────────────────────────────────────────
+
+  searchCatalog(query: McpCatalogSearchQuery = {}): McpCatalogSearchResult {
+    return searchMcpCatalog(this.catalog, this.state.connections, query);
+  }
+
+  previewInstall(catalogId: string): McpInstallPreview {
+    if (!this.catalog.isAvailable()) {
+      throw new Error("MCP catalog is offline. Installed connections can still be managed.");
+    }
+    const entry = this.catalog.get(catalogId);
+    if (!entry) throw new Error(`MCP catalog entry "${catalogId}" was not found.`);
+    const existing = this.state.connections.find(
+      (c) => c.catalogId === catalogId || c.name.toLowerCase() === entry.name.toLowerCase()
+    );
+    return {
+      catalogId,
+      entry,
+      permissionLines: [
+        ...entry.permissionSummary,
+        "Install requires explicit user confirmation.",
+        "After install, review tools and establish a trust record before first use.",
+        "Bind individual tools to Agent Roles — the whole server is never exposed by default."
+      ],
+      requiresConfirm: true,
+      wouldReplaceConnectionId: existing?.id
+    };
+  }
+
+  /**
+   * Install MCP connection from local catalog.
+   * Requires confirm:true. Starts untrusted until operator trusts.
+   */
+  async installFromCatalog(
+    catalogId: string,
+    options: { confirm?: boolean; env?: Record<string, string>; authToken?: string } = {}
+  ): Promise<McpConnection> {
+    if (options.confirm !== true) {
+      throw new Error(
+        "Install requires explicit user confirmation (confirm: true). Unknown MCP servers are never installed silently."
+      );
+    }
+    if (!this.catalog.isAvailable()) {
+      throw new Error("MCP catalog is offline. Cannot install; existing connections remain available.");
+    }
+    const preview = this.previewInstall(catalogId);
+    const entry = preview.entry;
+    const now = new Date().toISOString();
+
+    // Replace same catalog id if present (treat as reinstall/update inventory)
+    if (preview.wouldReplaceConnectionId) {
+      await this.remove(preview.wouldReplaceConnectionId);
+    }
+
+    const created = await this.create({
+      name: entry.name,
+      transport: entry.transport,
+      command: entry.command,
+      args: entry.args,
+      url: entry.url,
+      env: options.env,
+      authToken: options.authToken,
+      fakeServerId: entry.fakeServerId,
+      enabled: true
+    });
+
+    const connection = await this.getMutable(created.id);
+    connection.source = "catalog";
+    connection.catalogId = entry.id;
+    connection.version = entry.version;
+    connection.tags = [...entry.tags];
+    connection.description = entry.description;
+    connection.trustLevel = entry.trustLevel;
+    connection.trusted = false;
+    connection.trustedAt = undefined;
+    connection.updatedAt = now;
+
+    this.state.installs[connection.id] = {
+      connectionId: connection.id,
+      catalogId: entry.id,
+      version: entry.version,
+      installedAt: now,
+      updatedAt: now,
+      history: []
+    };
+
+    await this.persist();
+    return normalizeConnection(connection);
+  }
+
+  async permissionSummary(connectionId: string): Promise<McpPermissionSummary> {
+    const connection = await this.get(connectionId);
+    const catalog = connection.catalogId ? this.catalog.get(connection.catalogId) : undefined;
+    const lines = buildMcpPermissionLines(connection, catalog?.permissionSummary);
+    const requiresTrustConfirmation = this.isTrustRequired(connection) && connection.trusted !== true;
+    return {
+      connectionId: connection.id,
+      name: connection.name,
+      version: connection.version,
+      source: connection.source,
+      catalogId: connection.catalogId,
+      tools: (connection.tools ?? []).map((tool) => ({
+        name: tool.name,
+        risk: tool.risk,
+        description: tool.description
+      })),
+      permissionLines: lines,
+      trusted: connection.trusted === true,
+      requiresTrustConfirmation
+    };
+  }
+
+  async trust(connectionId: string): Promise<McpConnection> {
+    const connection = await this.getMutable(connectionId);
+    const now = new Date().toISOString();
+    connection.trusted = true;
+    connection.trustedAt = now;
+    connection.updatedAt = now;
+    await this.persist();
+    return normalizeConnection(connection);
+  }
+
+  async revokeTrust(connectionId: string): Promise<McpConnection> {
+    const connection = await this.getMutable(connectionId);
+    connection.trusted = false;
+    connection.trustedAt = undefined;
+    connection.updatedAt = new Date().toISOString();
+    await this.persist();
+    return normalizeConnection(connection);
+  }
+
+  async previewUpdate(connectionId: string): Promise<McpUpdatePreview> {
+    const connection = await this.get(connectionId);
+    if (!connection.catalogId) {
+      throw new Error(`Connection ${connectionId} was not installed from the catalog.`);
+    }
+    if (!this.catalog.isAvailable()) {
+      throw new Error("MCP catalog is offline. Cannot preview updates; installed connection remains usable.");
+    }
+    const entry = this.catalog.get(connection.catalogId);
+    if (!entry) throw new Error(`MCP catalog entry "${connection.catalogId}" was not found.`);
+    return {
+      connectionId,
+      catalogId: entry.id,
+      currentVersion: connection.version ?? "0.0.0",
+      targetVersion: entry.version,
+      permissionLines: [
+        ...entry.permissionSummary,
+        "Version updates require user confirmation and re-establish trust before first use."
+      ],
+      requiresConfirm: true,
+      configDiff: previewConfigDiff(connection, entry)
+    };
+  }
+
+  /**
+   * Apply catalog update. Snapshots current config for rollback.
+   * Resets trust for the new version.
+   */
+  async updateFromCatalog(
+    connectionId: string,
+    options: { confirm?: boolean } = {}
+  ): Promise<McpConnection> {
+    if (options.confirm !== true) {
+      throw new Error("Update requires explicit user confirmation (confirm: true).");
+    }
+    const preview = await this.previewUpdate(connectionId);
+    const connection = await this.getMutable(connectionId);
+    const entry = this.catalog.get(preview.catalogId);
+    if (!entry) throw new Error(`MCP catalog entry "${preview.catalogId}" was not found.`);
+
+    const now = new Date().toISOString();
+    const snapshot = captureSnapshot(connection, now);
+    const install = this.state.installs[connectionId] ?? {
+      connectionId,
+      catalogId: entry.id,
+      version: connection.version ?? "0.0.0",
+      installedAt: connection.createdAt,
+      updatedAt: now,
+      history: []
+    };
+    install.history = [snapshot, ...install.history].slice(0, MAX_HISTORY);
+
+    connection.version = entry.version;
+    connection.command = entry.command ?? connection.command;
+    connection.args = entry.args ? [...entry.args] : connection.args;
+    connection.url = entry.url ?? connection.url;
+    connection.transport = entry.transport;
+    connection.description = entry.description;
+    connection.tags = [...entry.tags];
+    connection.trustLevel = entry.trustLevel;
+    connection.trusted = false;
+    connection.trustedAt = undefined;
+    connection.updatedAt = now;
+
+    install.version = entry.version;
+    install.catalogId = entry.id;
+    install.updatedAt = now;
+    this.state.installs[connectionId] = install;
+
+    await this.persist();
+    return normalizeConnection(connection);
+  }
+
+  async rollback(
+    connectionId: string,
+    options: { confirm?: boolean; version?: string } = {}
+  ): Promise<McpConnection> {
+    if (options.confirm !== true) {
+      throw new Error("Rollback requires explicit user confirmation (confirm: true).");
+    }
+    const connection = await this.getMutable(connectionId);
+    const install = this.state.installs[connectionId];
+    if (!install?.history?.length) {
+      throw new Error(`No rollback history for MCP connection ${connectionId}.`);
+    }
+    let snapshot = install.history[0];
+    if (options.version) {
+      const found = install.history.find((entry) => entry.version === options.version);
+      if (!found) throw new Error(`Version "${options.version}" not found in rollback history.`);
+      snapshot = found;
+    }
+
+    const now = new Date().toISOString();
+    // Push current into history
+    install.history = [captureSnapshot(connection, now), ...install.history.filter((h) => h !== snapshot)].slice(
+      0,
+      MAX_HISTORY
+    );
+
+    connection.version = snapshot.version;
+    connection.name = snapshot.name;
+    connection.transport = snapshot.transport;
+    connection.command = snapshot.command;
+    connection.args = snapshot.args ? [...snapshot.args] : undefined;
+    connection.url = snapshot.url;
+    connection.envKeys = snapshot.envKeys ? [...snapshot.envKeys] : undefined;
+    connection.catalogId = snapshot.catalogId ?? connection.catalogId;
+    connection.trusted = false;
+    connection.trustedAt = undefined;
+    connection.updatedAt = now;
+
+    install.version = snapshot.version;
+    install.updatedAt = now;
+    this.state.installs[connectionId] = install;
+
+    await this.persist();
+    return normalizeConnection(connection);
+  }
+
+  private isTrustRequired(connection: McpConnection): boolean {
+    if (!this.requireTrustForCatalog) return false;
+    // Catalog-sourced and explicitly untrusted connections need trust.
+    if (connection.source === "catalog") return true;
+    if (connection.trusted === false) return true;
+    return false;
   }
 
   private async openClient(connection: McpConnection): Promise<McpClient> {
@@ -674,7 +1002,8 @@ export class McpService {
     const durable: McpState = {
       schemaVersion: 1,
       connections: this.state.connections.map((entry) => toDurableConnection(entry)),
-      roleBindings: this.state.roleBindings.map((entry) => structuredClone(entry))
+      roleBindings: this.state.roleBindings.map((entry) => structuredClone(entry)),
+      installs: structuredClone(this.state.installs ?? {})
     };
     const json = `${JSON.stringify(durable, null, 2)}\n`;
     assertNoSecretsInJson(json);
@@ -697,8 +1026,38 @@ export function toPublicMcpConnection(connection: McpConnection): PublicMcpConne
     credentialUpdatedAt: connection.credentialUpdatedAt,
     tools: connection.tools?.map(normalizeTool),
     lastTest: connection.lastTest ? { ...connection.lastTest } : undefined,
+    catalogId: connection.catalogId,
+    version: connection.version,
+    source: connection.source,
+    tags: connection.tags ? [...connection.tags] : undefined,
+    description: connection.description,
+    trusted: connection.trusted === true,
+    trustedAt: connection.trustedAt,
+    trustLevel: connection.trustLevel,
+    installStatus: resolveMcpInstallStatus(connection),
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt
+  };
+}
+
+function resolveTrustedFlag(entry: McpConnection): boolean {
+  if (typeof entry.trusted === "boolean") return entry.trusted;
+  // Legacy Task-24 rows (no trusted field): treat manual as trusted.
+  if (entry.source === "catalog") return false;
+  return true;
+}
+
+function captureSnapshot(connection: McpConnection, at: string): McpConnectionSnapshot {
+  return {
+    version: connection.version ?? "0.0.0",
+    name: connection.name,
+    transport: connection.transport,
+    command: connection.command,
+    args: connection.args ? [...connection.args] : undefined,
+    url: connection.url,
+    envKeys: connection.envKeys ? [...connection.envKeys] : undefined,
+    catalogId: connection.catalogId,
+    capturedAt: at
   };
 }
 
@@ -717,6 +1076,14 @@ function toDurableConnection(connection: McpConnection): McpConnection {
     credentialUpdatedAt: connection.credentialUpdatedAt,
     tools: connection.tools?.map(normalizeTool),
     lastTest: connection.lastTest ? { ...connection.lastTest } : undefined,
+    catalogId: connection.catalogId,
+    version: connection.version,
+    source: connection.source,
+    tags: connection.tags ? [...connection.tags] : undefined,
+    description: connection.description,
+    trusted: connection.trusted,
+    trustedAt: connection.trustedAt,
+    trustLevel: connection.trustLevel,
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt
   };
@@ -734,6 +1101,13 @@ function toBackupConnectionRow(connection: McpConnection): McpConnection {
     url: connection.url,
     credentialRef: connection.credentialRef,
     credentialPresent: false,
+    catalogId: connection.catalogId,
+    version: connection.version,
+    source: connection.source,
+    tags: connection.tags ? [...connection.tags] : undefined,
+    description: connection.description,
+    trusted: connection.trusted,
+    trustLevel: connection.trustLevel,
     createdAt: connection.createdAt,
     updatedAt: connection.updatedAt,
     tools: connection.tools?.map(normalizeTool)
@@ -756,6 +1130,14 @@ function normalizeConnection(entry: McpConnection): McpConnection {
     credentialUpdatedAt: entry.credentialUpdatedAt,
     tools: entry.tools?.map(normalizeTool),
     lastTest: entry.lastTest ? { ...entry.lastTest } : undefined,
+    catalogId: entry.catalogId,
+    version: entry.version,
+    source: entry.source ?? (entry.catalogId ? "catalog" : "manual"),
+    tags: entry.tags ? [...entry.tags] : undefined,
+    description: entry.description,
+    trusted: resolveTrustedFlag(entry),
+    trustedAt: entry.trustedAt,
+    trustLevel: entry.trustLevel,
     createdAt: entry.createdAt,
     updatedAt: entry.updatedAt
   };

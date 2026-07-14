@@ -143,14 +143,16 @@ describe("No-mistakes independent review loop", () => {
     expect(first.review!.status).toBe("changes_requested");
     expect(first.fixDispatched).toBe(true);
     expect(fixDispatches).toHaveLength(1);
-    expect(fixDispatches[0]).toContain("Firstmate 派发的审查修复任务");
+    expect(fixDispatches[0]).toMatch(/Firstmate 派发的审查修复/);
     expect(first.run.reviewLoop).toMatchObject({ autoFixCyclesUsed: 1, maxAutoFixCycles: 1 });
     expect(first.run.status).toBe("awaiting_review");
 
-    // Thin evidence after auto fix still fails; auto dispatch must not fire again.
+    // Thin evidence after auto fix still fails; auto dispatch must not fire again — pause for user.
     const second = await reviews.performReview(run.id, { autoDispatchFix: true });
     expect(second.review!.status).toBe("changes_requested");
     expect(second.fixDispatched).toBe(false);
+    expect(second.paused).toBe(true);
+    expect(second.run.status).toBe("paused");
     expect(second.run.reviewLoop?.autoFixCyclesUsed).toBe(1);
     await expect(reviews.dispatchFix(run.id)).rejects.toThrow(/fix cycle limit|authorize an additional fix/i);
 
@@ -306,8 +308,9 @@ describe("No-mistakes independent review loop", () => {
       cycle: 0,
       role: "reviewer"
     });
-    expect(instruction).toContain("Firstmate 派发的审查修复任务");
-    expect(instruction).toContain("运行 npm test 并写日志");
+    expect(instruction).toMatch(/Firstmate 派发的审查修复/);
+    expect(instruction).toMatch(/运行 npm test|验证已记录/);
+    expect(instruction).toMatch(/禁止顺手重构|不得越界|已确认/);
     expect(instruction).not.toMatch(/writeFile|unlink|rm -rf/i);
   });
 

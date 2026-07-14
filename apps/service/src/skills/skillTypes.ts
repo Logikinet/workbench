@@ -1,12 +1,32 @@
 /**
- * Skill catalog types (Task 22).
+ * Skill catalog types (Task 22 + Task 40 lifecycle).
  * Skills encode methods/instructions; Tools encode permission capabilities.
+ *
+ * Source priority (higher wins; builtin is never silently overwritten):
+ *   builtin (100) > project (80) > user_local/trusted_dir (60) > imported (50) > catalog (40)
  */
 
 import type { ToolPermissionCategory } from "../tools/toolTypes.js";
 import type { Harness, ReasoningEffort, RolePermissions } from "../roles/roleService.js";
 
-export type SkillSource = "builtin" | "trusted_dir" | "imported";
+/** Origin of a skill package. `trusted_dir` is kept as an alias of user_local for Task 22. */
+export type SkillSource =
+  | "builtin"
+  | "user_local"
+  | "project"
+  | "catalog"
+  | "trusted_dir"
+  | "imported";
+
+/** Higher number = stronger claim when resolving name conflicts. */
+export const SKILL_SOURCE_PRIORITY: Readonly<Record<SkillSource, number>> = {
+  builtin: 100,
+  project: 80,
+  user_local: 60,
+  trusted_dir: 60,
+  imported: 50,
+  catalog: 40
+};
 
 export interface SkillFrontmatterMeta {
   name?: string;
@@ -20,6 +40,36 @@ export interface SkillFrontmatterMeta {
   permissionHints?: ToolPermissionCategory[];
 }
 
+export type SkillInstallStatus =
+  | "builtin"
+  | "not_installed"
+  | "installed"
+  | "update_available"
+  | "drifted"
+  | "disabled";
+
+export interface SkillVersionSnapshot {
+  version: string;
+  contentHash: string;
+  rawContent: string;
+  capturedAt: string;
+  /** Catalog id when this snapshot came from the catalog. */
+  catalogId?: string;
+}
+
+/** Durable install inventory for a skill (source + version + rollback history). */
+export interface SkillInstallRecord {
+  skillId: string;
+  source: SkillSource;
+  catalogId?: string;
+  version: string;
+  contentHash: string;
+  installedAt: string;
+  updatedAt: string;
+  /** Previous versions for rollback (newest first, capped). */
+  history: SkillVersionSnapshot[];
+}
+
 export interface SkillDefinition {
   id: string;
   name: string;
@@ -30,6 +80,10 @@ export interface SkillDefinition {
   /** Directory that contained the skill (must be under a trusted root). */
   sourceDir?: string;
   source: SkillSource;
+  /** Optional project id when source is project. */
+  projectId?: string;
+  /** Catalog entry id when installed from the local catalog. */
+  catalogId?: string;
   enabled: boolean;
   trusted: boolean;
   trustedAt?: string;
@@ -41,16 +95,124 @@ export interface SkillDefinition {
   rawContent?: string;
   /** Instruction body with frontmatter stripped. */
   instructions: string;
+  /** sha256 of raw content for drift detection. */
+  contentHash?: string;
+  installStatus?: SkillInstallStatus;
   createdAt: string;
   updatedAt: string;
 }
 
+export interface SkillConflict {
+  skillId: string;
+  winner: SkillSource;
+  losers: Array<{ source: SkillSource; path?: string; reason: string }>;
+}
+
+export interface SkillDetail extends SkillDefinition {
+  installStatus: SkillInstallStatus;
+  installRecord?: SkillInstallRecord;
+  contentHash: string;
+  permissionSummary: SkillPermissionSummary;
+  conflicts: SkillConflict["losers"];
+  /** Whether a newer catalog version exists. */
+  updateAvailable: boolean;
+  catalogVersion?: string;
+  drifted: boolean;
+}
+
+export interface SkillPermissionSummary {
+  skillId: string;
+  name: string;
+  version: string;
+  source: SkillSource;
+  permissionHints: ToolPermissionCategory[];
+  requiredTools: string[];
+  trusted: boolean;
+  /** Human-readable lines for first-run trust UI. */
+  lines: string[];
+  requiresTrustConfirmation: boolean;
+}
+
+export interface SkillCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  tags: string[];
+  author?: string;
+  recommended?: boolean;
+  requiredTools: string[];
+  permissionHints: ToolPermissionCategory[];
+  instructions: string;
+  /** Optional prebuilt SKILL.md; otherwise synthesized. */
+  rawContent?: string;
+}
+
+export interface SkillCatalogSearchQuery {
+  query?: string;
+  tags?: string[];
+  recommendedOnly?: boolean;
+  /** When true, only return catalog rows that are not yet installed. */
+  notInstalledOnly?: boolean;
+}
+
+export interface SkillCatalogSearchResult {
+  /** False when the catalog provider is offline — installed skills remain manageable. */
+  catalogAvailable: boolean;
+  entries: Array<
+    SkillCatalogEntry & {
+      installed: boolean;
+      installedVersion?: string;
+      recommended: boolean;
+    }
+  >;
+  installedCount: number;
+}
+
+export interface SkillDriftReport {
+  skillId: string;
+  drifted: boolean;
+  expectedHash?: string;
+  actualHash?: string;
+  expectedVersion?: string;
+  actualVersion?: string;
+  message: string;
+}
+
+export interface SkillUpdatePreview {
+  skillId: string;
+  currentVersion: string;
+  targetVersion: string;
+  drifted: boolean;
+  drift?: SkillDriftReport;
+  /** Unified-style text diff (local/current → target). */
+  diff: string;
+  permissionSummary: SkillPermissionSummary;
+  requiresConfirm: true;
+  catalogId?: string;
+}
+
+export interface SkillInstallPreview {
+  catalogId: string;
+  entry: SkillCatalogEntry;
+  permissionSummary: SkillPermissionSummary;
+  wouldOverwrite?: { skillId: string; source: SkillSource; version: string };
+  blockedByBuiltin: boolean;
+  requiresConfirm: true;
+}
+
 export interface SkillState {
   schemaVersion: 1;
-  /** Absolute trusted directories the operator approved for skill import. */
+  /** Absolute trusted directories the operator approved for skill import (user_local). */
   trustedDirectories: string[];
+  /** Project-scoped skill roots (project source, higher than user_local). */
+  projectDirectories?: Array<{ projectId: string; directory: string }>;
+  /** Directory where catalog installs are written (absolute). */
+  installRoot?: string;
   /** Runtime flags for skills (enable/trust) keyed by skill id. */
   overrides: Record<string, { enabled?: boolean; trusted?: boolean; trustedAt?: string }>;
+  /** Install inventory keyed by skill id. */
+  installs?: Record<string, SkillInstallRecord>;
 }
 
 export interface ImportSkillsResult {
@@ -58,6 +220,7 @@ export interface ImportSkillsResult {
   imported: SkillDefinition[];
   skipped: Array<{ id: string; reason: string }>;
   errors: Array<{ path: string; reason: string }>;
+  conflicts?: SkillConflict[];
 }
 
 /** Role-shaped input for capability resolution (name-only skills/tools supported). */

@@ -13,6 +13,9 @@ interface TodoBoardProps {
   serviceUrl: string;
   available: boolean;
   dataEpoch?: number;
+  /** Deep-link focus: open Run detail for this Todo when present. */
+  focusTodoId?: string;
+  onFocusTodo?(todoId: string | undefined): void;
 }
 
 const statusLabels: Record<TodoStatus, string> = {
@@ -23,7 +26,13 @@ const statusLabels: Record<TodoStatus, string> = {
   completed: "已完成"
 };
 
-export function TodoBoard({ serviceUrl, available, dataEpoch = 0 }: TodoBoardProps) {
+export function TodoBoard({
+  serviceUrl,
+  available,
+  dataEpoch = 0,
+  focusTodoId,
+  onFocusTodo
+}: TodoBoardProps) {
   const todosClient = createTodoClient(serviceUrl);
   const projectsClient = createProjectClient(serviceUrl);
   const [todos, setTodos] = useState<TodoRecord[]>([]);
@@ -55,6 +64,39 @@ export function TodoBoard({ serviceUrl, available, dataEpoch = 0 }: TodoBoardPro
   useEffect(() => {
     void reload();
   }, [available, status, query, showArchived, dataEpoch]);
+
+  // Deep-link: resolve focusTodoId into the Run detail panel (may need unfiltered fetch).
+  useEffect(() => {
+    if (!available || !focusTodoId) {
+      if (!focusTodoId) setRunTodo(null);
+      return;
+    }
+    if (runTodo?.id === focusTodoId) return;
+    const fromList = todos.find((entry) => entry.id === focusTodoId);
+    if (fromList) {
+      setRunTodo(fromList);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const all = await todosClient.list({});
+        const found = all.find((entry) => entry.id === focusTodoId);
+        if (!cancelled && found) {
+          setRunTodo(found);
+          setStatus(found.status);
+          setShowArchived(found.archived);
+        } else if (!cancelled) {
+          setNotice("未找到对应 Todo。");
+        }
+      } catch (error) {
+        if (!cancelled) setNotice(error instanceof Error ? error.message : "无法打开 Todo");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [available, focusTodoId, todos, runTodo?.id]);
 
   const createTodo = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -152,7 +194,10 @@ export function TodoBoard({ serviceUrl, available, dataEpoch = 0 }: TodoBoardPro
         <RunTimelinePanel
           serviceUrl={serviceUrl}
           todo={runTodo}
-          onClose={() => setRunTodo(null)}
+          onClose={() => {
+            setRunTodo(null);
+            onFocusTodo?.(undefined);
+          }}
           onTodoChange={(changed) => {
             setRunTodo(changed);
             setTodos((current) => {
@@ -168,7 +213,7 @@ export function TodoBoard({ serviceUrl, available, dataEpoch = 0 }: TodoBoardPro
       )}
       <ul className="todo-list">
         {todos.map((todo) => (
-          <li key={todo.id}>
+          <li key={todo.id} className={runTodo?.id === todo.id ? "todo-focused" : undefined}>
             <div>
               <strong>{todo.title}</strong>
               {todo.description && <small>{todo.description}</small>}
@@ -190,7 +235,16 @@ export function TodoBoard({ serviceUrl, available, dataEpoch = 0 }: TodoBoardPro
                     ))}
                 </select>
               )}
-              <button type="button" className="quiet-button" onClick={() => setRunTodo(todo)}>Runs</button>
+              <button
+                type="button"
+                className={runTodo?.id === todo.id ? "active-tab" : "quiet-button"}
+                onClick={() => {
+                  setRunTodo(todo);
+                  onFocusTodo?.(todo.id);
+                }}
+              >
+                Runs
+              </button>
               <button type="button" className="quiet-button" onClick={() => edit(todo)}>编辑</button>
               <button type="button" className="quiet-button" onClick={() => void updateTodo(todo, { archived: !todo.archived })}>{todo.archived ? "恢复" : "归档"}</button>
             </div>

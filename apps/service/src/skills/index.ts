@@ -1,5 +1,6 @@
 export {
   BUILTIN_SKILL_SEEDS,
+  SKILL_SOURCE_PRIORITY,
   type CapabilityBlock,
   type CapabilitySnapshot,
   type ExposedTool,
@@ -12,11 +13,38 @@ export {
   type ResolveCapabilitiesInput,
   type ResolveCapabilitiesResult,
   type RoleCapabilityConfig,
+  type SkillCatalogEntry,
+  type SkillCatalogSearchQuery,
+  type SkillCatalogSearchResult,
+  type SkillConflict,
   type SkillDefinition,
+  type SkillDetail,
+  type SkillDriftReport,
   type SkillFrontmatterMeta,
+  type SkillInstallPreview,
+  type SkillInstallRecord,
+  type SkillInstallStatus,
+  type SkillPermissionSummary,
   type SkillSource,
-  type SkillState
+  type SkillState,
+  type SkillUpdatePreview,
+  type SkillVersionSnapshot
 } from "./skillTypes.js";
+export {
+  LOCAL_SKILL_CATALOG_SEEDS,
+  LocalSkillCatalogProvider,
+  buildPermissionSummary,
+  buildSkillMarkdownFromCatalog,
+  canSourceOverride,
+  catalogEntryAsDefinition,
+  compareSemverLike,
+  hashSkillContent,
+  previewTextDiff,
+  resolveInstallStatus,
+  searchSkillCatalog,
+  skillSourcePriority,
+  type SkillCatalogProvider
+} from "./skillCatalog.js";
 export {
   parseFrontmatterBlock,
   parseSkillFrontmatter,

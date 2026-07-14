@@ -1,0 +1,252 @@
+/**
+ * research.md + structured sources + evidence catalog artifacts (Task 32).
+ */
+
+import { assertAggregated } from "./researchWorkflow.js";
+import type {
+  ProduceArtifactsResult,
+  ResearchArtifactDescriptor,
+  ResearchClaim,
+  ResearchEvidence,
+  ResearchSession,
+  StructuredSource
+} from "./researchTypes.js";
+
+export const RESEARCH_MD_PATH = "research.md";
+export const SOURCES_JSON_PATH = "sources.json";
+export const EVIDENCE_CATALOG_PATH = "evidence/catalog.md";
+export const RESEARCH_ARTIFACT_KIND = "research-report";
+export const SOURCES_ARTIFACT_KIND = "research-sources";
+export const EVIDENCE_CATALOG_KIND = "research-evidence-catalog";
+
+function originLabel(origin: ResearchEvidence["origin"] | ResearchClaim["originMarker"]): string {
+  switch (origin) {
+    case "web":
+      return "网页";
+    case "pdf":
+      return "PDF";
+    case "user_material":
+      return "用户材料";
+    case "ai_inference":
+      return "AI 推断";
+    case "manual":
+      return "手工录入";
+    case "source_backed":
+      return "来源支持";
+    default:
+      return String(origin);
+  }
+}
+
+function formatLocation(e: ResearchEvidence): string {
+  const loc = e.location;
+  if (!loc) return "—";
+  const parts: string[] = [];
+  if (loc.page !== undefined) parts.push(`p.${loc.page}`);
+  if (loc.paragraph !== undefined) parts.push(`¶${loc.paragraph}`);
+  if (loc.anchor) parts.push(loc.anchor);
+  if (loc.selector) parts.push(loc.selector);
+  if (loc.charStart !== undefined && loc.charEnd !== undefined) {
+    parts.push(`chars ${loc.charStart}-${loc.charEnd}`);
+  }
+  return parts.join(", ") || "—";
+}
+
+export function buildResearchMarkdown(session: ResearchSession): string {
+  assertAggregated(session);
+
+  const finalFacts = session.claims.filter((c) => c.finalFactEligible && (c.kind === "fact" || c.kind === "conclusion"));
+  const inferences = session.claims.filter((c) => c.kind === "ai_inference");
+  const userMaterials = session.claims.filter((c) => c.kind === "user_material");
+  const otherClaims = session.claims.filter(
+    (c) => !c.finalFactEligible && c.kind !== "ai_inference" && c.kind !== "user_material"
+  );
+
+  const lines: string[] = [
+    `# ${session.title}`,
+    "",
+    `> Research session \`${session.id}\`${session.runId ? ` · run \`${session.runId}\`` : ""}`,
+    `> Force evidence mode: **${session.forceEvidenceMode ? "on" : "off"}** · Aggregated: **yes**`,
+    "",
+    "## Goal",
+    "",
+    session.goal,
+    "",
+    "## Sub-questions",
+    ""
+  ];
+
+  for (const [i, q] of session.subQuestions.entries()) {
+    lines.push(`${i + 1}. ${q}`);
+  }
+
+  lines.push("", "## Final facts & conclusions (Evidence-bound)", "");
+  if (finalFacts.length === 0) {
+    lines.push("_No final facts eligible. Evidence may be insufficient, flagged, or conflicting._", "");
+  } else {
+    for (const claim of finalFacts) {
+      const evRefs = claim.evidenceIds.map((id) => `\`${id.slice(0, 8)}\``).join(", ");
+      lines.push(`- **[${claim.kind}]** ${claim.text}`);
+      lines.push(`  - Origin: ${originLabel(claim.originMarker)}`);
+      lines.push(`  - Evidence: ${evRefs || "_none_"}`);
+    }
+    lines.push("");
+  }
+
+  if (otherClaims.length > 0) {
+    lines.push("## Provisional claims (not final facts)", "");
+    for (const claim of otherClaims) {
+      lines.push(`- (${claim.kind}) ${claim.text} — evidence: ${claim.evidenceIds.join(", ") || "none"}`);
+    }
+    lines.push("");
+  }
+
+  if (inferences.length > 0) {
+    lines.push("## AI inferences (not final facts)", "");
+    for (const claim of inferences) {
+      lines.push(`- _[AI 推断]_ ${claim.text}`);
+    }
+    lines.push("");
+  }
+
+  if (userMaterials.length > 0) {
+    lines.push("## User materials (distinct from source Evidence)", "");
+    for (const claim of userMaterials) {
+      lines.push(`- _[用户材料]_ ${claim.text}`);
+    }
+    lines.push("");
+  }
+
+  if (session.conflicts.length > 0) {
+    lines.push("## Conflicting viewpoints", "");
+    for (const conflict of session.conflicts) {
+      lines.push(`### ${conflict.topic}`);
+      lines.push(`Resolution: \`${conflict.resolution ?? "unresolved"}\``);
+      for (const pos of conflict.positions) {
+        lines.push(`- ${pos.summary} (claim \`${pos.claimId.slice(0, 8)}\`)`);
+      }
+      if (conflict.notes) lines.push(`  - _${conflict.notes}_`);
+      lines.push("");
+    }
+  }
+
+  lines.push("## Sources (summary)", "");
+  for (const src of session.sources) {
+    const flags = src.qualityFlags.length ? ` flags=[${src.qualityFlags.join(",")}]` : "";
+    lines.push(
+      `- **${src.title}** — ${src.source} (trust ${src.trustScore.toFixed(2)}${flags})`
+    );
+  }
+  if (session.sources.length === 0) lines.push("_No sources._");
+
+  lines.push("", "## Evidence directory", "");
+  lines.push(`See \`${EVIDENCE_CATALOG_PATH}\` for full excerpts and locators.`, "");
+  lines.push("---", "");
+  lines.push(`_Generated by evidence-first research workflow · ${session.updatedAt}_`, "");
+
+  return lines.join("\n");
+}
+
+export function buildSourcesList(session: ResearchSession): StructuredSource[] {
+  assertAggregated(session);
+  return session.sources.map((s) => ({ ...s, evidenceIds: [...s.evidenceIds] }));
+}
+
+export function buildSourcesJson(session: ResearchSession): string {
+  const sources = buildSourcesList(session);
+  return `${JSON.stringify({ schemaVersion: 1, sessionId: session.id, sources }, null, 2)}\n`;
+}
+
+export function buildEvidenceCatalogMarkdown(session: ResearchSession): string {
+  assertAggregated(session);
+  const lines: string[] = [
+    `# Evidence catalog — ${session.title}`,
+    "",
+    `| ID | Title | Origin | Source | Author | Published | Accessed | Location | Flags | Trust |`,
+    `| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |`
+  ];
+
+  for (const e of session.evidence) {
+    lines.push(
+      `| \`${e.id.slice(0, 8)}\` | ${escapeCell(e.title)} | ${e.origin} | ${escapeCell(e.source)} | ${escapeCell(e.author ?? "")} | ${e.publishedAt ?? ""} | ${e.accessedAt} | ${escapeCell(formatLocation(e))} | ${e.qualityFlags.join(",") || "—"} | ${e.trustScore.toFixed(2)} |`
+    );
+  }
+
+  lines.push("", "## Excerpts", "");
+  for (const e of session.evidence) {
+    lines.push(`### \`${e.id}\` — ${e.title}`, "");
+    lines.push(`- **Status:** ${e.status}`);
+    lines.push(`- **Origin:** ${originLabel(e.origin)}`);
+    lines.push(`- **Source:** ${e.source}`);
+    if (e.author) lines.push(`- **Author:** ${e.author}`);
+    if (e.publishedAt) lines.push(`- **Published:** ${e.publishedAt}`);
+    lines.push(`- **Accessed:** ${e.accessedAt}`);
+    lines.push(`- **Location:** ${formatLocation(e)}`);
+    lines.push(`- **Quality:** ${e.qualityFlags.join(", ") || "none"}`);
+    lines.push("", "> " + e.excerpt.replace(/\n/g, "\n> "), "");
+  }
+
+  return lines.join("\n");
+}
+
+function escapeCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+export function produceResearchArtifacts(session: ResearchSession): ProduceArtifactsResult {
+  assertAggregated(session);
+
+  const researchMarkdown = buildResearchMarkdown(session);
+  const sourcesJson = buildSourcesJson(session);
+  const evidenceCatalogMarkdown = buildEvidenceCatalogMarkdown(session);
+
+  const artifacts: ResearchArtifactDescriptor[] = [
+    {
+      path: RESEARCH_MD_PATH,
+      kind: RESEARCH_ARTIFACT_KIND,
+      summary: `Evidence-first research report (${session.claims.filter((c) => c.finalFactEligible).length} final facts)`
+    },
+    {
+      path: SOURCES_JSON_PATH,
+      kind: SOURCES_ARTIFACT_KIND,
+      summary: `Structured source list (${session.sources.length} sources)`
+    },
+    {
+      path: EVIDENCE_CATALOG_PATH,
+      kind: EVIDENCE_CATALOG_KIND,
+      summary: `Evidence catalog (${session.evidence.length} items)`
+    }
+  ];
+
+  const next: ResearchSession = {
+    ...session,
+    artifacts,
+    status: session.status === "ready_for_review" || session.status === "completed"
+      ? session.status
+      : "ready_for_review",
+    updatedAt: new Date().toISOString()
+  };
+
+  return {
+    session: next,
+    researchMarkdown,
+    sourcesJson,
+    evidenceCatalogMarkdown,
+    artifacts
+  };
+}
+
+/** Optional helper to write artifacts under a workspace root (injectable fs). */
+export interface ArtifactWriter {
+  writeFile(path: string, content: string): Promise<void>;
+}
+
+export async function writeResearchArtifacts(
+  produced: ProduceArtifactsResult,
+  writer: ArtifactWriter
+): Promise<ResearchArtifactDescriptor[]> {
+  await writer.writeFile(RESEARCH_MD_PATH, produced.researchMarkdown);
+  await writer.writeFile(SOURCES_JSON_PATH, produced.sourcesJson);
+  await writer.writeFile(EVIDENCE_CATALOG_PATH, produced.evidenceCatalogMarkdown);
+  return produced.artifacts;
+}

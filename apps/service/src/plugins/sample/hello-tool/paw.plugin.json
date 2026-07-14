@@ -1,0 +1,42 @@
+{
+  "id": "hello-tool",
+  "name": "Hello Tool",
+  "version": "1.0.0",
+  "description": "Minimal sample extension that registers a greeting tool.",
+  "author": "personal-ai-workbench",
+  "apiVersion": "1",
+  "engine": {
+    "minCoreVersion": "0.1.0",
+    "maxCoreVersion": "2.0.0"
+  },
+  "entry": {
+    "type": "inprocess",
+    "main": "main.mjs"
+  },
+  "permissions": ["tool.register"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "greeting": { "type": "string", "default": "Hello" }
+    }
+  },
+  "secretsSchema": {
+    "keys": []
+  },
+  "contributes": {
+    "tools": [
+      {
+        "id": "hello.greet",
+        "name": "hello.greet",
+        "description": "Return a friendly greeting for the local workbench.",
+        "category": "readonly",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" }
+          }
+        }
+      }
+    ]
+  }
+}

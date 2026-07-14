@@ -1,0 +1,13 @@
+
+> personal-ai-workbench@0.1.0 release-gate
+> node --import tsx scripts/e2e/write-release-gate-report.mts
+
+Release gate: PASS
+  pass=5 warn=0 fail=0 skip=0
+  [PASS] install-scripts-present (INSTALL_SCRIPTS_OK)
+  [PASS] uninstall-preserves-data (UNINSTALL_PRESERVES_DATA)
+  [PASS] credential-vault-redaction (CREDENTIAL_VAULT_REDACTION_OK)
+  [PASS] fake-provider-plan-execute (FAKE_PROVIDER_PLAN_EXECUTE_OK)
+  [PASS] acceptance-report-written (ACCEPTANCE_REPORT_WRITTEN)
+Report: C:\Users\Administrator\.grok\worktrees\desktop-todos\todos\personal-ai-workbench\reports\release-gate-acceptance.md
+Environment risks (not CI failures): real OpenAI-compatible key, real Codex CLI login.

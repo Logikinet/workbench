@@ -144,7 +144,44 @@ export function RolesPanel({ serviceUrl, available, dataEpoch = 0 }: RolesPanelP
       <div className="project-actions"><button type="submit" disabled={!available}>{editing ? "保存 Role" : "创建 Role"}</button>{editing && <button type="button" className="quiet-button" onClick={() => { setEditing(null); setDraft(emptyDraft); }}>取消</button>}</div>
     </form>
     {notice && <p className="notice" role="status">{notice}</p>}
-    <ul className="role-list">{roles.map((role) => <li key={role.id}><div><strong>{role.name}</strong><span>{role.harness} · {role.reasoningEffort} · {role.responsibility}</span><small>{role.skills.join(", ")} · {role.tools.join(", ")}</small></div><div className="project-actions"><span className={`tag ${role.enabled ? "active" : "archived"}`}>{role.enabled ? "已启用" : "已停用"}</span><button type="button" className="quiet-button" onClick={() => void verify(role)}>验证</button><button type="button" className="quiet-button" onClick={() => void copy(role)}>复制</button><button type="button" className="quiet-button" onClick={() => beginEdit(role)}>编辑</button><button type="button" className="quiet-button" onClick={() => void update(role, { enabled: !role.enabled })}>{role.enabled ? "停用" : "启用"}</button><button type="button" className="quiet-button" onClick={() => void remove(role)}>删除</button></div></li>)}</ul>
+    <ul className="role-list">{roles.map((role) => {
+      const bound = role.connectionId
+        ? connections.find((connection) => connection.id === role.connectionId)
+        : undefined;
+      const connectionLabel = role.harness === "codex-cli"
+        ? "Codex CLI 本机登录"
+        : bound
+          ? `连接 ${bound.name}${bound.enabled === false ? "（已停用）" : ""}`
+          : role.connectionId
+            ? "连接未在列表中 / 可能已删除"
+            : "未绑定连接";
+      return (
+        <li key={role.id}>
+          <div>
+            <strong>{role.name}</strong>
+            <span>{role.harness} · {role.reasoningEffort} · {role.responsibility}</span>
+            <small>能力：{role.skills.join(", ") || "—"} · 工具：{role.tools.join(", ") || "—"}</small>
+            <small>连接：{connectionLabel}{role.modelId ? ` · 模型 ${role.modelId}` : ""}</small>
+            <small>
+              Firstmate 自动调用：{role.allowFirstmateAutoInvoke ? "允许" : "禁止"}
+              {" · "}
+              实例：{role.enabled ? "已启用（可被路由）" : "已停用"}
+            </small>
+          </div>
+          <div className="project-actions">
+            <span className={`tag ${role.enabled ? "active" : "archived"}`}>{role.enabled ? "已启用" : "已停用"}</span>
+            <span className={`tag ${role.allowFirstmateAutoInvoke ? "active" : "archived"}`}>
+              {role.allowFirstmateAutoInvoke ? "可自动调用" : "仅手动"}
+            </span>
+            <button type="button" className="quiet-button" onClick={() => void verify(role)}>验证</button>
+            <button type="button" className="quiet-button" onClick={() => void copy(role)}>复制</button>
+            <button type="button" className="quiet-button" onClick={() => beginEdit(role)}>编辑</button>
+            <button type="button" className="quiet-button" onClick={() => void update(role, { enabled: !role.enabled })}>{role.enabled ? "停用" : "启用"}</button>
+            <button type="button" className="quiet-button" onClick={() => void remove(role)}>删除</button>
+          </div>
+        </li>
+      );
+    })}</ul>
   </section>;
 }
 

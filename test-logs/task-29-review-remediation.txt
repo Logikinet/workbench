@@ -1,0 +1,14 @@
+
+ RUN  v3.2.7 C:/Users/Administrator/.grok/worktrees/desktop-todos/todos/personal-ai-workbench
+
+ 鉁?apps/service/src/subtasks/subtaskDagService.test.ts (17 tests) 241ms
+ 鉁?apps/service/src/subtasks/subtaskRoutes.test.ts (3 tests) 137ms
+ 鉁?apps/service/src/review/reviewRemediation.test.ts (9 tests) 388ms
+ 鉁?apps/service/src/review/llmReviewer.test.ts (12 tests) 633ms
+ 鉁?apps/service/src/review/reviewService.test.ts (11 tests) 428ms
+
+ Test Files  5 passed (5)
+      Tests  52 passed (52)
+   Start at  04:36:51
+   Duration  2.22s (transform 861ms, setup 0ms, collect 3.25s, tests 1.83s, environment 1ms, prepare 737ms)
+

@@ -1,5 +1,5 @@
 /**
- * MCP connection types (Task 24).
+ * MCP connection types (Task 24 + Task 40 catalog lifecycle).
  * Secret values live in a CredentialVault; persisted state never stores raw env/auth.
  */
 
@@ -7,6 +7,15 @@
 export type McpTransportKind = "stdio" | "http" | "fake";
 
 export type McpToolRisk = "read" | "write" | "network" | "shell" | "dangerous";
+
+export type McpCatalogTrustLevel = "official" | "community";
+
+export type McpInstallStatus =
+  | "not_installed"
+  | "installed"
+  | "update_available"
+  | "disabled"
+  | "untrusted";
 
 export type McpTestKind =
   | "success"
@@ -52,6 +61,16 @@ export interface McpConnection {
   /** Last discovered tools (descriptions only; no secrets). */
   tools?: McpToolDescriptor[];
   lastTest?: McpTestResult;
+  /** Catalog lifecycle (Task 40). */
+  catalogId?: string;
+  version?: string;
+  source?: "manual" | "catalog";
+  tags?: string[];
+  description?: string;
+  /** Operator trust gate — catalog installs start untrusted. */
+  trusted?: boolean;
+  trustedAt?: string;
+  trustLevel?: McpCatalogTrustLevel;
   createdAt: string;
   updatedAt: string;
 }
@@ -70,8 +89,109 @@ export interface PublicMcpConnection {
   credentialUpdatedAt?: string;
   tools?: McpToolDescriptor[];
   lastTest?: McpTestResult;
+  catalogId?: string;
+  version?: string;
+  source?: "manual" | "catalog";
+  tags?: string[];
+  description?: string;
+  trusted: boolean;
+  trustedAt?: string;
+  trustLevel?: McpCatalogTrustLevel;
+  installStatus?: McpInstallStatus;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Discoverable MCP server template (local catalog — no third-party marketplace brand). */
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  tags: string[];
+  recommended?: boolean;
+  transport: McpTransportKind;
+  command?: string;
+  args?: string[];
+  url?: string;
+  /** Env key names the template expects (values supplied at install; never in catalog). */
+  envKeys?: string[];
+  /** Risk summary lines for first-run trust UI. */
+  permissionSummary: string[];
+  trustLevel: McpCatalogTrustLevel;
+  /** Optional fake server id for tests. */
+  fakeServerId?: string;
+}
+
+export interface McpCatalogSearchQuery {
+  query?: string;
+  tags?: string[];
+  recommendedOnly?: boolean;
+  notInstalledOnly?: boolean;
+}
+
+export interface McpCatalogSearchResult {
+  catalogAvailable: boolean;
+  entries: Array<
+    McpCatalogEntry & {
+      installed: boolean;
+      installedConnectionId?: string;
+      installedVersion?: string;
+      recommended: boolean;
+    }
+  >;
+  installedCount: number;
+}
+
+export interface McpConnectionSnapshot {
+  version: string;
+  name: string;
+  transport: McpTransportKind;
+  command?: string;
+  args?: string[];
+  url?: string;
+  envKeys?: string[];
+  catalogId?: string;
+  capturedAt: string;
+}
+
+export interface McpInstallRecord {
+  connectionId: string;
+  catalogId?: string;
+  version: string;
+  installedAt: string;
+  updatedAt: string;
+  history: McpConnectionSnapshot[];
+}
+
+export interface McpPermissionSummary {
+  connectionId: string;
+  name: string;
+  version?: string;
+  source?: "manual" | "catalog";
+  catalogId?: string;
+  tools: Array<{ name: string; risk?: McpToolRisk; description?: string }>;
+  permissionLines: string[];
+  trusted: boolean;
+  requiresTrustConfirmation: boolean;
+}
+
+export interface McpInstallPreview {
+  catalogId: string;
+  entry: McpCatalogEntry;
+  permissionLines: string[];
+  requiresConfirm: true;
+  wouldReplaceConnectionId?: string;
+}
+
+export interface McpUpdatePreview {
+  connectionId: string;
+  catalogId: string;
+  currentVersion: string;
+  targetVersion: string;
+  permissionLines: string[];
+  requiresConfirm: true;
+  configDiff: string;
 }
 
 export interface CreateMcpConnectionInput {
@@ -135,6 +255,7 @@ export type McpCallErrorKind =
   | "unavailable"
   | "disabled"
   | "not_bound"
+  | "untrusted"
   | "permission_denied"
   | "timeout"
   | "cancelled"
@@ -179,6 +300,7 @@ export interface McpConnectionStateSnapshot {
   schemaVersion: 1;
   connections: McpConnection[];
   roleBindings: RoleMcpBinding[];
+  installs?: Record<string, McpInstallRecord>;
   secretsExcluded: true;
 }
 

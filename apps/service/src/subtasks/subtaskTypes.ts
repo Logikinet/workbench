@@ -85,6 +85,12 @@ export interface Subtask {
   blockedReason?: string;
   correctionNotes: string[];
   routingInstanceId?: string;
+  /** plan = approved plan step; review_remediation = Task 29 fix subtask from review findings. */
+  origin?: "plan" | "review_remediation";
+  /** Independent review id when origin is review_remediation. */
+  sourceReviewId?: string;
+  /** Finding severity when origin is review_remediation. */
+  findingSeverity?: "none" | "low" | "medium" | "high" | "critical";
 }
 
 export interface DagCheckpoint {
@@ -137,6 +143,9 @@ export interface ExplicitSubtaskDef {
   accessMode?: SubtaskAccessMode;
   independentWorktree?: boolean;
   routingInstanceId?: string;
+  origin?: "plan" | "review_remediation";
+  sourceReviewId?: string;
+  findingSeverity?: "none" | "low" | "medium" | "high" | "critical";
 }
 
 export interface RoutingSelectionHint {
@@ -171,6 +180,34 @@ export interface CreateDagFromPlanInput {
   routingSelections?: RoutingSelectionHint[];
   maxParallelRead?: number;
   maxParallelIndependentWrite?: number;
+}
+
+/** Append constrained review-fix subtasks (Task 29 remediation loop). */
+export interface AppendRemediationSubtasksInput {
+  runId: string;
+  reviewId: string;
+  /** Plan version for new DAG when none exists; ignored when appending to existing. */
+  planVersion?: number;
+  cycle?: number;
+  explicitSubtasks: ExplicitSubtaskDef[];
+  /** Optional agent assignments keyed by subtask id / routingInstanceId. */
+  agentAssignments?: Array<{
+    subtaskId: string;
+    agent: SubtaskAgentInstance;
+  }>;
+  /**
+   * When true (default), cancel incomplete prior review_remediation subtasks
+   * so only the current remediation cycle remains active.
+   */
+  cancelPriorRemediation?: boolean;
+  autoSchedule?: boolean;
+}
+
+export interface AppendRemediationResult {
+  dag: SubtaskDag;
+  createdIds: string[];
+  cancelledIds: string[];
+  created: boolean;
 }
 
 export interface CompleteSubtaskInput {

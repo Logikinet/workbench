@@ -1,5 +1,5 @@
 /**
- * Skills + capability resolution HTTP routes (Task 22).
+ * Skills + capability resolution HTTP routes (Task 22 + Task 40 lifecycle).
  *
  * Mount later from main / app.ts (owned by another agent):
  *
@@ -10,14 +10,26 @@
  *
  * Routes:
  * - GET    /api/skills
+ * - GET    /api/skills/catalog
  * - GET    /api/skills/trusted-directories
+ * - GET    /api/skills/project-directories
  * - GET    /api/skills/:skillId
+ * - GET    /api/skills/:skillId/detail
  * - GET    /api/skills/:skillId/content
+ * - GET    /api/skills/:skillId/permissions
+ * - GET    /api/skills/:skillId/drift
+ * - GET    /api/skills/:skillId/update-preview
  * - POST   /api/skills/trusted-directories
+ * - POST   /api/skills/project-directories
  * - POST   /api/skills/import
+ * - POST   /api/skills/catalog/install
+ * - POST   /api/skills/catalog/preview-install
  * - POST   /api/skills/:skillId/enable
  * - POST   /api/skills/:skillId/disable
  * - POST   /api/skills/:skillId/trust
+ * - POST   /api/skills/:skillId/revoke-trust
+ * - POST   /api/skills/:skillId/update
+ * - POST   /api/skills/:skillId/rollback
  * - POST   /api/capabilities/resolve
  * - POST   /api/capabilities/migrate-role
  */
@@ -48,8 +60,42 @@ export function createSkillRouter(deps: SkillRouteDeps): Router {
     }
   });
 
+  router.get("/api/skills/catalog", (request: Request, response: Response) => {
+    try {
+      const tagsRaw = request.query.tags;
+      const tags =
+        typeof tagsRaw === "string"
+          ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean)
+          : Array.isArray(tagsRaw)
+            ? tagsRaw.flatMap((t) => String(t).split(",")).map((t) => t.trim()).filter(Boolean)
+            : undefined;
+      response.json(
+        deps.skills.searchCatalog({
+          query: typeof request.query.q === "string" ? request.query.q : typeof request.query.query === "string" ? request.query.query : undefined,
+          tags,
+          recommendedOnly: request.query.recommended === "1" || request.query.recommended === "true",
+          notInstalledOnly: request.query.notInstalled === "1" || request.query.notInstalled === "true"
+        })
+      );
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to search skill catalog.") });
+    }
+  });
+
   router.get("/api/skills/trusted-directories", (_request: Request, response: Response) => {
     response.json({ trustedDirectories: deps.skills.trustedDirectories() });
+  });
+
+  router.get("/api/skills/project-directories", (_request: Request, response: Response) => {
+    response.json({ projectDirectories: deps.skills.projectDirectories() });
+  });
+
+  router.get("/api/skills/:skillId/detail", async (request: Request, response: Response) => {
+    try {
+      response.json(await deps.skills.getDetail(routeParam(request.params.skillId)));
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to load skill detail.") });
+    }
   });
 
   router.get("/api/skills/:skillId", (request: Request, response: Response) => {
@@ -72,11 +118,40 @@ export function createSkillRouter(deps: SkillRouteDeps): Router {
         id: skill.id,
         name: skill.name,
         version: skill.version,
+        source: skill.source,
+        trusted: skill.trusted,
+        installStatus: skill.installStatus,
+        permissionHints: skill.permissionHints,
+        requiredTools: skill.requiredTools,
         instructions: skill.instructions,
         raw
       });
     } catch (error) {
       response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to load skill content.") });
+    }
+  });
+
+  router.get("/api/skills/:skillId/permissions", (request: Request, response: Response) => {
+    try {
+      response.json(deps.skills.permissionSummary(routeParam(request.params.skillId)));
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to load permission summary.") });
+    }
+  });
+
+  router.get("/api/skills/:skillId/drift", async (request: Request, response: Response) => {
+    try {
+      response.json(await deps.skills.checkDrift(routeParam(request.params.skillId)));
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to check skill drift.") });
+    }
+  });
+
+  router.get("/api/skills/:skillId/update-preview", async (request: Request, response: Response) => {
+    try {
+      response.json(await deps.skills.previewUpdate(routeParam(request.params.skillId)));
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to preview skill update.") });
     }
   });
 
@@ -93,6 +168,21 @@ export function createSkillRouter(deps: SkillRouteDeps): Router {
     }
   });
 
+  router.post("/api/skills/project-directories", async (request: Request, response: Response) => {
+    try {
+      const projectId = readString(request.body?.projectId, "projectId");
+      const directory = readString(request.body?.directory ?? request.body?.path, "directory");
+      const resolved = await deps.skills.addProjectDirectory(projectId, directory);
+      response.status(201).json({
+        projectId,
+        directory: resolved,
+        projectDirectories: deps.skills.projectDirectories()
+      });
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to register project skill directory.") });
+    }
+  });
+
   router.post("/api/skills/import", async (request: Request, response: Response) => {
     try {
       const directory = readString(request.body?.directory ?? request.body?.path, "directory");
@@ -104,6 +194,31 @@ export function createSkillRouter(deps: SkillRouteDeps): Router {
       response.status(201).json(result);
     } catch (error) {
       response.status(400).json({ error: errorMessage(error, "Unable to import skills.") });
+    }
+  });
+
+  router.post("/api/skills/catalog/preview-install", (request: Request, response: Response) => {
+    try {
+      const catalogId = readString(request.body?.catalogId ?? request.body?.id, "catalogId");
+      response.json(deps.skills.previewInstall(catalogId));
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to preview catalog install.") });
+    }
+  });
+
+  router.post("/api/skills/catalog/install", async (request: Request, response: Response) => {
+    try {
+      const catalogId = readString(request.body?.catalogId ?? request.body?.id, "catalogId");
+      if (request.body?.confirm !== true) {
+        response.status(400).json({
+          error: "Install requires explicit user confirmation (confirm: true)."
+        });
+        return;
+      }
+      const installed = await deps.skills.installFromCatalog(catalogId, { confirm: true });
+      response.status(201).json(installed);
+    } catch (error) {
+      response.status(400).json({ error: errorMessage(error, "Unable to install skill from catalog.") });
     }
   });
 
@@ -128,6 +243,48 @@ export function createSkillRouter(deps: SkillRouteDeps): Router {
       response.json(await deps.skills.trust(routeParam(request.params.skillId)));
     } catch (error) {
       response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to trust skill.") });
+    }
+  });
+
+  router.post("/api/skills/:skillId/revoke-trust", async (request: Request, response: Response) => {
+    try {
+      response.json(await deps.skills.revokeTrust(routeParam(request.params.skillId)));
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to revoke skill trust.") });
+    }
+  });
+
+  router.post("/api/skills/:skillId/update", async (request: Request, response: Response) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Update requires explicit user confirmation (confirm: true)." });
+        return;
+      }
+      response.json(
+        await deps.skills.updateFromCatalog(routeParam(request.params.skillId), {
+          confirm: true,
+          forceDespiteDrift: request.body?.forceDespiteDrift === true
+        })
+      );
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to update skill.") });
+    }
+  });
+
+  router.post("/api/skills/:skillId/rollback", async (request: Request, response: Response) => {
+    try {
+      if (request.body?.confirm !== true) {
+        response.status(400).json({ error: "Rollback requires explicit user confirmation (confirm: true)." });
+        return;
+      }
+      response.json(
+        await deps.skills.rollback(routeParam(request.params.skillId), {
+          confirm: true,
+          version: typeof request.body?.version === "string" ? request.body.version : undefined
+        })
+      );
+    } catch (error) {
+      response.status(statusFor(error)).json({ error: errorMessage(error, "Unable to rollback skill.") });
     }
   });
 

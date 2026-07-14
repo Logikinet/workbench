@@ -11,11 +11,39 @@ import {
   type RunService,
   type WorktreeArtifactEvidence
 } from "../runs/runService.js";
+import type {
+  AppendRemediationResult,
+  SubtaskAgentInstance,
+  SubtaskDagService
+} from "../subtasks/index.js";
 import {
   REVIEWER_SYSTEM_INSTRUCTION,
   reviewerOutputSchema,
   type ReviewerModelOutput
 } from "./reviewSchemas.js";
+import {
+  buildConstrainedFixInstruction,
+  buildFixSubtasksFromReview,
+  canApplyWorktreeAfterReview,
+  selectFixAgent,
+  shouldPauseForUserAfterFailedRemediation,
+  type ReviewFixSubtaskSpec
+} from "./reviewRemediation.js";
+
+export {
+  buildConstrainedFixInstruction,
+  buildFixSubtasksFromReview,
+  canApplyWorktreeAfterReview,
+  selectFixAgent,
+  shouldPauseForUserAfterFailedRemediation
+} from "./reviewRemediation.js";
+export type {
+  BuildFixSubtasksResult,
+  FixAgentSelectionInput,
+  ReviewFixSubtaskSpec,
+  ReviewProblemType,
+  WorktreeApplyReviewGate
+} from "./reviewRemediation.js";
 
 /** Independent Reviewer input: never includes write credentials or mutation APIs. */
 export interface ReviewContext {
@@ -87,21 +115,44 @@ export interface ReviewServiceOptions {
   modelRuntime?: ModelRuntime;
   /** Agent Role used only for review — must be configurable separately from the executor. */
   reviewerRoleId?: string;
+  /**
+   * Optional subtask DAG service (Task 21/29). When set, review findings become
+   * constrained remediation subtasks before Firstmate restarts the fix agent.
+   */
+  subtasks?: Pick<SubtaskDagService, "appendRemediationSubtasks">;
+  /** Optional specialized fix agents Firstmate may prefer over the original executor. */
+  fixSpecialists?: SubtaskAgentInstance[];
+  /** Optional resolver for specialized fix roles by problem type. */
+  resolveFixAgent?: (input: {
+    spec: ReviewFixSubtaskSpec;
+    originalAgent?: Run["execution"]["selectedAgent"];
+  }) => SubtaskAgentInstance | undefined;
 }
 
 export interface PerformReviewResult {
   run: Run;
   review?: ReviewIndex;
   fixDispatched: boolean;
-  /** True when the review model was unavailable / failed and the Run was paused. */
+  /** True when the review model was unavailable / failed, or auto-fix budget exhausted. */
   paused?: boolean;
   pauseReason?: string;
+  /** Present when findings were converted into remediation subtasks during auto-dispatch. */
+  remediation?: RemediationDispatchSummary;
+}
+
+export interface RemediationDispatchSummary {
+  subtaskIds: string[];
+  instruction: string;
+  unmetCount: number;
+  dagCreated?: boolean;
+  cancelledSubtaskIds?: string[];
 }
 
 export interface DispatchFixResult {
   run: Run;
   continued: boolean;
   reason?: "awaiting_write_session_approval" | "agent_not_started" | "prepared_only";
+  remediation?: RemediationDispatchSummary;
 }
 
 export interface AcceptanceResult {
@@ -184,16 +235,44 @@ export class ReviewService {
     const review = resolveIndependentReview(recorded);
     if (!review) throw new Error("Structured independent review was not persisted.");
 
+    const autoFixCyclesUsed = recorded.reviewLoop?.autoFixCyclesUsed ?? 0;
+    const maxAutoFixCycles = recorded.reviewLoop?.maxAutoFixCycles ?? 1;
     const autoDispatch = input.autoDispatchFix !== false
       && output.conclusion === "changes_requested"
-      && (recorded.reviewLoop?.autoFixCyclesUsed ?? 0) < (recorded.reviewLoop?.maxAutoFixCycles ?? 1);
+      && autoFixCyclesUsed < maxAutoFixCycles;
 
-    if (!autoDispatch) {
-      return { run: recorded, review, fixDispatched: false };
+    if (autoDispatch) {
+      const fixed = await this.dispatchFix(runId, { userAuthorized: false });
+      return {
+        run: fixed.run,
+        review,
+        fixDispatched: fixed.continued,
+        remediation: fixed.remediation
+      };
     }
 
-    const fixed = await this.dispatchFix(runId, { userAuthorized: false });
-    return { run: fixed.run, review, fixDispatched: fixed.continued };
+    // Task 29: after the single auto remediation cycle, still failing → pause for user.
+    if (
+      shouldPauseForUserAfterFailedRemediation({
+        conclusion: output.conclusion,
+        autoFixCyclesUsed,
+        maxAutoFixCycles,
+        autoDispatchEnabled: input.autoDispatchFix !== false
+      })
+    ) {
+      const pauseReason =
+        "自动修复循环已用尽，独立复审仍未通过；已暂停并交由用户决定（授权再次修复或调整范围）。";
+      const paused = await this.options.runs.transition(runId, "paused", pauseReason);
+      return {
+        run: paused,
+        review,
+        fixDispatched: false,
+        paused: true,
+        pauseReason
+      };
+    }
+
+    return { run: recorded, review, fixDispatched: false };
   }
 
   async dispatchFix(runId: string, input: { userAuthorized?: boolean } = {}): Promise<DispatchFixResult> {
@@ -236,19 +315,74 @@ export class ReviewService {
           role: "reviewer" as const
         };
 
+    // Task 29: convert each confirmed finding into a constrained fix subtask (+ re-verify).
+    const plan = approvedPlan(run);
+    const built = buildFixSubtasksFromReview({
+      review: instructionSource,
+      allowedScope: plan?.allowedScope,
+      cycle: instructionSource.cycle ?? (run.reviews.filter((r) => r.kind === "independent").length - 1)
+    });
+    const instruction = built.unmetCount > 0
+      ? built.instruction
+      : buildFixInstruction(instructionSource);
+
+    let remediation: RemediationDispatchSummary | undefined;
+    if (this.options.subtasks && built.explicitSubtasks.length > 0) {
+      const assignments = built.specs.map((spec) => {
+        const resolved = this.options.resolveFixAgent?.({
+          spec,
+          originalAgent: run.execution.selectedAgent
+        });
+        const agent = resolved ?? selectFixAgent({
+          spec,
+          originalAgent: run.execution.selectedAgent,
+          fixSpecialists: this.options.fixSpecialists
+        });
+        return { subtaskId: spec.id, agent };
+      });
+      const appended = await this.options.subtasks.appendRemediationSubtasks({
+        runId,
+        reviewId: instructionSource.id,
+        planVersion: plan?.version,
+        cycle: instructionSource.cycle ?? 0,
+        explicitSubtasks: built.explicitSubtasks,
+        agentAssignments: assignments,
+        autoSchedule: true
+      });
+      remediation = toRemediationSummary(built.specs, instruction, built.unmetCount, appended);
+      await this.options.runs.recordLog(runId, {
+        level: "info",
+        message: `审查修复子任务已派发：${remediation.subtaskIds.join(", ")}（${built.unmetCount} 个未通过项；验证子任务含在内）。`
+      });
+    } else if (built.unmetCount > 0) {
+      remediation = {
+        subtaskIds: built.specs.map((s) => s.id),
+        instruction,
+        unmetCount: built.unmetCount
+      };
+    }
+
     let prepared = run;
     if (!run.reviewLoop?.pendingFixInstruction) {
-      prepared = await this.options.runs.prepareReviewFix(runId, buildFixInstruction(instructionSource), { userAuthorized });
+      prepared = await this.options.runs.prepareReviewFix(runId, instruction, { userAuthorized });
     }
 
     if (!this.options.dispatchFixAgent || !prepared.execution.selectedAgent) {
-      return { run: prepared, continued: false, reason: "prepared_only" };
+      return { run: prepared, continued: false, reason: "prepared_only", remediation };
     }
 
     try {
-      await this.options.dispatchFixAgent(runId, prepared.reviewLoop?.pendingFixInstruction ?? buildFixInstruction(instructionSource));
+      await this.options.dispatchFixAgent(
+        runId,
+        prepared.reviewLoop?.pendingFixInstruction ?? instruction
+      );
     } catch {
-      return { run: await this.options.runs.get(runId), continued: false, reason: "agent_not_started" };
+      return {
+        run: await this.options.runs.get(runId),
+        continued: false,
+        reason: "agent_not_started",
+        remediation
+      };
     }
 
     const after = await this.options.runs.get(runId);
@@ -258,7 +392,8 @@ export class ReviewService {
       return {
         run: await this.options.runs.get(runId),
         continued: false,
-        reason: "awaiting_write_session_approval"
+        reason: "awaiting_write_session_approval",
+        remediation
       };
     }
 
@@ -267,8 +402,14 @@ export class ReviewService {
     return {
       run: after,
       continued,
-      reason: continued ? undefined : "agent_not_started"
+      reason: continued ? undefined : "agent_not_started",
+      remediation
     };
+  }
+
+  /** Gate helper: Worktree apply / formal complete require passed independent review + user accept. */
+  canApplyWorktree(run: Run) {
+    return canApplyWorktreeAfterReview(run);
   }
 
   async accept(runId: string, summary: string): Promise<AcceptanceResult> {
@@ -511,10 +652,18 @@ export function evaluateReview(context: ReviewContext): StructuredReviewOutput {
 }
 
 export function buildFixInstruction(review: ReviewIndex): string {
-  const findings = (review.findings ?? [])
-    .filter((finding) => !finding.met)
-    .map((finding) => `- ${finding.criterion}：${finding.fixScope ?? finding.evidence}`)
-    .join("\n");
+  // Prefer Task 29 constrained multi-subtask instruction when structured findings exist.
+  const unmet = (review.findings ?? []).filter((finding) => !finding.met);
+  if (unmet.length > 0) {
+    return buildConstrainedFixInstruction({
+      review,
+      specs: buildFixSubtasksFromReview({
+        review,
+        includeVerificationSubtask: true
+      }).specs.filter((spec) => spec.sourceFindingIndex >= 0),
+      verificationIncluded: true
+    });
+  }
   const scope = review.fixScope?.trim() || "按审查结论修复未通过项。";
   const risks = (review.residualRisks ?? []).length
     ? `剩余风险：\n${(review.residualRisks ?? []).map((risk) => `- ${risk}`).join("\n")}`
@@ -522,10 +671,25 @@ export function buildFixInstruction(review: ReviewIndex): string {
   return [
     "Firstmate 派发的审查修复任务（Reviewer 不修改成果，由原专业代理执行）：",
     scope,
-    findings ? `未通过项：\n${findings}` : `审查摘要：${review.summary}`,
+    `审查摘要：${review.summary}`,
     risks,
-    "仅在已批准计划边界内修复；完成后不要声称已通过审查。"
+    "仅在已批准计划边界内修复；禁止无关重构；完成后不要声称已通过审查。"
   ].filter(Boolean).join("\n");
+}
+
+function toRemediationSummary(
+  specs: ReviewFixSubtaskSpec[],
+  instruction: string,
+  unmetCount: number,
+  appended?: AppendRemediationResult
+): RemediationDispatchSummary {
+  return {
+    subtaskIds: appended?.createdIds ?? specs.map((s) => s.id),
+    instruction,
+    unmetCount,
+    dagCreated: appended?.created,
+    cancelledSubtaskIds: appended?.cancelledIds
+  };
 }
 
 /** Render structured review as readable Markdown (saved with the independent review). */
@@ -861,7 +1025,12 @@ function detectProhibitionViolation(context: ReviewContext): string | undefined 
       if (/拒绝.*删除|delete.*reject/i.test(blob)) return `可能违反禁止项：${prohibition}`;
     }
   }
-  if (/未获授权|outside_workspace|工作区外|禁止/.test(blob) && /拒绝|rejected|不得/.test(blob)) {
+  // Require concrete attempt/rejection signals — not remediation instruction text like
+  // “禁止顺手重构 / 不得声称已通过审查” which is policy language, not a violation.
+  const attemptedUnauthorized =
+    /尝试未授权|未获授权操作|outside_workspace|工作区外操作|危险操作.*拒绝|拒绝.*危险操作|pendingApproval.*reject|execution approval.*reject/i.test(blob)
+    || (/未获授权|outside_workspace|工作区外/.test(blob) && /已拒绝|rejected|用户拒绝该操作/.test(blob));
+  if (attemptedUnauthorized) {
     return "时间线显示曾尝试未授权操作（已拒绝）；若成果依赖该操作则需在边界内重做。";
   }
   return undefined;
