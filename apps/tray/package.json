@@ -1,0 +1,14 @@
+{
+  "name": "@paw/tray",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts"
+  },
+  "bin": {
+    "paw-tray": "./dist/main.js"
+  }
+}

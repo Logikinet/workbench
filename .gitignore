@@ -1,0 +1,14 @@
+node_modules/
+apps/*/dist/
+apps/*/dist-types/
+*.tsbuildinfo
+*.log
+.workbench/
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+*.local
+coverage/
+.vitest/

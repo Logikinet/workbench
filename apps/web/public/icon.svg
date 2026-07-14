@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="Personal AI Workbench">
+  <rect width="192" height="192" rx="42" fill="#101826"/>
+  <path d="M47 54h42c26 0 44 16 44 41 0 24-18 43-44 43H67v25H47V54Zm20 19v46h21c16 0 25-9 25-23 0-14-9-23-25-23H67Z" fill="#7dd3fc"/>
+  <circle cx="142" cy="144" r="14" fill="#34d399"/>
+</svg>
