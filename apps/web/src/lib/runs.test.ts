@@ -31,6 +31,23 @@ describe("Run selection", () => {
     expect(fetch).toHaveBeenNthCalledWith(2, "http://127.0.0.1:41731/api/runs/run-1/plan-decisions", expect.objectContaining({ method: "POST" }));
   });
 
+  it("unwraps plan-decision responses that include orchestration metadata", async () => {
+    const fetch = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          run: { id: "run-1", status: "queued", todoId: "todo-1" },
+          orchestration: { dagCreated: true, startedAgents: [{ subtaskId: "s1" }] }
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetch);
+    const client = createRunClient("http://127.0.0.1:41731");
+    const run = await client.decidePlan("run-1", { decision: "approved", summary: "范围明确。" });
+    expect(run).toMatchObject({ id: "run-1", status: "queued" });
+    expect(run).not.toHaveProperty("orchestration");
+  });
+
   it("starts a selected Professional Agent through the approved Run endpoint", async () => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "run-1", status: "running" }), { status: 202 }));
     vi.stubGlobal("fetch", fetch);

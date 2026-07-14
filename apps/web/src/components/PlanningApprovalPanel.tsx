@@ -129,7 +129,13 @@ export function PlanningApprovalPanel({ serviceUrl, run, onRunChange, onNotice, 
       }
       const changed = await client.decidePlan(run.id, { decision, summary });
       onRunChange(changed);
-      onNotice(decision === "approved" ? "计划已批准；验证命令已绑定批准版本，尚未启动正式执行。" : decision === "returned" ? "已退回，Secondmate 已生成下一版计划。" : "计划已取消，未启动执行。");
+      onNotice(
+        decision === "approved"
+          ? "计划已批准；Firstmate 将自动创建子任务并启动执行代理（验证命令已绑定批准版本）。"
+          : decision === "returned"
+            ? "已退回，Secondmate 已生成下一版计划。"
+            : "计划已取消，未启动执行。"
+      );
     } catch (error) { onNotice(error instanceof Error ? error.message : "无法记录计划决定"); }
   };
 

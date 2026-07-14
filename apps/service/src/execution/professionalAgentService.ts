@@ -51,6 +51,33 @@ export interface ProfessionalAgentServiceOptions {
   preferRuntimeAdapter?: boolean;
   /** Optional multi-turn tool-loop budget overrides (tests / host config). */
   toolLoopLimits?: Partial<ToolLoopLimits>;
+  /**
+   * Extra tools merged into the controlled tool loop (e.g. Firstmate self-management).
+   * Called per turn so the host can decide based on selection / role.
+   */
+  extraTools?: (ctx: {
+    runId: string;
+    selection: ProfessionalAgentSelection;
+    workspacePath: string;
+  }) => import("./toolLoop.js").ToolDefinition[] | Promise<import("./toolLoop.js").ToolDefinition[]>;
+  /**
+   * Optional system-instruction composition (Agent Home / hard rules).
+   * Return undefined to keep the selection systemInstruction unchanged.
+   */
+  composeSystemInstruction?: (ctx: {
+    runId: string;
+    selection: ProfessionalAgentSelection;
+    baseInstruction: string;
+  }) => string | Promise<string | undefined> | undefined;
+  /**
+   * Fired after a run's Professional Agent settles (success or failure).
+   * Used by continuous DAG orchestration — must not throw into the agent path.
+   */
+  onExecutionSettled?: (event: {
+    runId: string;
+    outcome: "completed" | "failed";
+    summary?: string;
+  }) => void | Promise<void>;
 }
 
 export interface TemporaryProfessionalAgentInput {
@@ -188,21 +215,32 @@ export class ProfessionalAgentService {
         this.releaseQueue(runId);
         return afterSaving;
       }
-      const completion = this.perform(runId, selection, controller.signal).catch(async (error: unknown) => {
-        const message = error instanceof Error ? error.message : "Professional Agent execution failed.";
-        await this.options.runs.failProfessionalExecution(runId, message);
-      });
+      let settled: { outcome: "completed" | "failed"; summary?: string } | undefined;
+      const completion = this.perform(runId, selection, controller.signal)
+        .then(async () => {
+          // perform calls finishProfessionalExecution on success; inspect final run status.
+          const after = await this.options.runs.get(runId);
+          if (after.execution.status === "succeeded" || after.status === "awaiting_review") {
+            settled = {
+              outcome: "completed",
+              summary: after.timeline.at(-1)?.summary ?? "Professional Agent 已完成"
+            };
+          }
+        })
+        .catch(async (error: unknown) => {
+          const message = error instanceof Error ? error.message : "Professional Agent execution failed.";
+          await this.options.runs.failProfessionalExecution(runId, message);
+          settled = { outcome: "failed", summary: message };
+        });
       active.completion = completion;
-      void completion.then(
-        () => {
-          this.clearActive(runId, active);
-          this.releaseQueue(runId);
-        },
-        () => {
-          this.clearActive(runId, active);
-          this.releaseQueue(runId);
+      void completion.finally(async () => {
+        this.clearActive(runId, active);
+        this.releaseQueue(runId);
+        // Continue DAG only after this agent is fully released from the active map.
+        if (settled) {
+          await this.notifySettled(runId, settled.outcome, settled.summary);
         }
-      );
+      });
       return started;
     } catch (error) {
       if (savedTemporaryRoleId) {
@@ -284,7 +322,7 @@ export class ProfessionalAgentService {
 
     const approvedCommands = resolveApprovedCommands(run, latestPlan);
     const pendingOverwriteApprovals = new Map<string, true>();
-    const tools = createControlledTools({
+    const controlled = createControlledTools({
       workspacePath: project.workspacePath,
       authorizedTools: selection.tools,
       permissions: selection.permissions ?? {
@@ -311,7 +349,12 @@ export class ProfessionalAgentService {
         };
       }
     });
+    const extra = this.options.extraTools
+      ? await this.options.extraTools({ runId, selection, workspacePath: project.workspacePath })
+      : [];
+    const tools = [...controlled, ...extra];
 
+    const toolNames = tools.map((tool) => tool.name).join("|") || "list_files|read_file|search_files|write_file|apply_patch|run_command";
     const taskPayload = JSON.stringify({
       task: todo.title,
       description: todo.description,
@@ -332,7 +375,7 @@ export class ProfessionalAgentService {
       corrections: run.messages.map((message) => message.content),
       outputContract: {
         multiTurn: [
-          { type: "tool_call", tool: "list_files|read_file|search_files|write_file|apply_patch|run_command", arguments: {} },
+          { type: "tool_call", tool: toolNames, arguments: {} },
           { type: "final", summary: "short non-secret summary", actions: [{ type: "write_file", path: "relative/path.ext", content: "file content" }] },
           { type: "ask_user", prompt: "...", reason: "..." },
           { type: "ask_approval", kind: "...", summary: "..." },
@@ -395,13 +438,41 @@ export class ProfessionalAgentService {
         }
       },
       {
-        systemInstruction: selection.systemInstruction,
+        systemInstruction: await this.resolveSystemInstruction(runId, selection),
         taskPayload,
         priorToolSummaries: priorToolSummaries.length > 0 ? priorToolSummaries : undefined
       }
     );
 
     await this.applyToolLoopResult(runId, selection, project.workspacePath, project.id, completedSteps, interruptedStep, loopResult, signal);
+  }
+
+  private async resolveSystemInstruction(runId: string, selection: ProfessionalAgentSelection): Promise<string> {
+    const base = selection.systemInstruction;
+    if (!this.options.composeSystemInstruction) return base;
+    try {
+      const composed = await this.options.composeSystemInstruction({
+        runId,
+        selection,
+        baseInstruction: base
+      });
+      return composed?.trim() || base;
+    } catch {
+      return base;
+    }
+  }
+
+  private async notifySettled(
+    runId: string,
+    outcome: "completed" | "failed",
+    summary?: string
+  ): Promise<void> {
+    if (!this.options.onExecutionSettled) return;
+    try {
+      await this.options.onExecutionSettled({ runId, outcome, summary });
+    } catch {
+      // Continuous orchestration must never break agent completion cleanup.
+    }
   }
 
   private async recordToolLoopEvent(runId: string, event: ToolLoopEvent): Promise<void> {
@@ -643,7 +714,9 @@ export class ProfessionalAgentService {
       // Pure final with no actions and no tools — still valid completion if summary present.
     }
 
-    await this.options.runs.finishProfessionalExecution(runId, `Professional Agent 已完成：${summarize(summary)}`);
+    const finishSummary = `Professional Agent 已完成：${summarize(summary)}`;
+    await this.options.runs.finishProfessionalExecution(runId, finishSummary);
+    // Continuous DAG is notified from start()'s completion.finally after clearActive.
   }
 
   private async captureRunFingerprint(run: Run) {

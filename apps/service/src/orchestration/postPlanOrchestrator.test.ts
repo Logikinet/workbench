@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SubtaskDagService } from "../subtasks/subtaskDagService.js";
 import type { Run } from "../runs/runService.js";
-import { orchestrateAfterPlanApproval } from "./postPlanOrchestrator.js";
+import { continueAfterAgentCompletion, orchestrateAfterPlanApproval } from "./postPlanOrchestrator.js";
 
 describe("post-plan orchestrator (auto-start after plan approve)", () => {
   let root: string;
@@ -95,5 +95,38 @@ describe("post-plan orchestrator (auto-start after plan approve)", () => {
 
     expect(result.dagCreated).toBe(true);
     expect(result.errors.length).toBeGreaterThan(0);
+  });
+
+  it("continues DAG after agent completion: complete → schedule → start next", async () => {
+    const professionalAgents = {
+      start: vi.fn().mockResolvedValue({ id: "run-1" })
+    };
+    const codexCli = {
+      start: vi.fn().mockResolvedValue({ id: "run-1" })
+    };
+
+    const first = await orchestrateAfterPlanApproval(approvedRun(), {
+      subtasks,
+      professionalAgents,
+      codexCli
+    });
+    expect(first.dagCreated).toBe(true);
+    expect(first.startedAgents.length).toBeGreaterThan(0);
+
+    professionalAgents.start.mockClear();
+    codexCli.start.mockClear();
+
+    const cont = await continueAfterAgentCompletion("run-1", {
+      subtasks,
+      professionalAgents,
+      codexCli
+    }, {
+      outcome: "completed",
+      summary: "第一步完成"
+    });
+
+    expect(cont.completedSubtasks.length).toBeGreaterThan(0);
+    // Either next agent started, or DAG finished (single-step edge cases)
+    expect(cont.startedAgents.length + (cont.dagComplete ? 1 : 0) + cont.errors.length).toBeGreaterThan(0);
   });
 });

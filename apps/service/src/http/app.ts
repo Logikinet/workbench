@@ -47,6 +47,11 @@ import { createAutomationRouter } from "../automation/automationRoutes.js";
 import type { AutomationService } from "../automation/automationService.js";
 import { createDoctorRouter } from "../doctor/doctorRoutes.js";
 import { createArtifactRouter } from "../artifacts/artifactRoutes.js";
+import { createResearchRouter } from "../research/researchRoutes.js";
+import { createDocumentRouter } from "../documents/documentRoutes.js";
+import { createCourseworkRouter } from "../coursework/courseworkRoutes.js";
+import { createPluginRouter } from "../plugins/pluginRoutes.js";
+import { createWatchdogRouter } from "../watchdog/watchdogRoutes.js";
 import type { ReviewService } from "../review/reviewService.js";
 import type { BackupService } from "../backup/backupService.js";
 import type { QueueConfigUpdate, RunQueueService } from "../queue/runQueueService.js";
@@ -78,6 +83,8 @@ export interface ServiceAppOptions {
   verification?: VerificationService;
   /** Task 20: Firstmate role router. */
   roleRouter?: RoleRouterService;
+  /** Task 38: deterministic ordered rules + session isolation (preferred when set). */
+  deterministicRouter?: import("../routing/deterministicRoutingService.js").DeterministicRoutingService;
   /** Task 21: Subtask DAG orchestration. */
   subtasks?: SubtaskDagService;
   /** Task 22: tools + skills capability runtime. */
@@ -220,9 +227,14 @@ export function createApp(options: ServiceAppOptions): Express {
     projects: options.projects
   });
 
-  // Task 20: Firstmate automatic role routing.
+  // Task 20/38: Firstmate role routing (+ deterministic rules when wired).
   if (options.roleRouter) {
-    app.use(createRoutingRouter({ roleRouter: options.roleRouter }));
+    app.use(
+      createRoutingRouter({
+        roleRouter: options.roleRouter,
+        deterministicRouter: options.deterministicRouter
+      })
+    );
   }
 
   // Task 21: Subtask dependency graph + continuous Firstmate scheduling.
@@ -264,6 +276,22 @@ export function createApp(options: ServiceAppOptions): Express {
 
   if (options.artifacts) {
     app.use(createArtifactRouter({ artifacts: options.artifacts }));
+  }
+
+  if (options.research) {
+    app.use(createResearchRouter({ research: options.research }));
+  }
+  if (options.documents) {
+    app.use(createDocumentRouter({ documents: options.documents }));
+  }
+  if (options.coursework) {
+    app.use(createCourseworkRouter({ coursework: options.coursework }));
+  }
+  if (options.plugins) {
+    app.use(createPluginRouter({ plugins: options.plugins }));
+  }
+  if (options.watchdog) {
+    app.use(createWatchdogRouter({ watchdog: options.watchdog }));
   }
 
   app.get("/api/queue/config", async (_request, response) => {

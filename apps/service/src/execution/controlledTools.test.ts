@@ -109,6 +109,12 @@ describe("controlledTools", () => {
     expect(allowed.ok).toBe(true);
     expect(allowed.summary).toContain("ran node");
     expect(allowed.artifacts?.[0]?.kind).toBe("command_result");
+    const evidenceRel = allowed.artifacts?.[0]?.path;
+    expect(evidenceRel).toMatch(/^evidence\/command-.+\.log$/);
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const written = await readFile(join(workspace, evidenceRel!), "utf8");
+    expect(written).toContain("ran node");
 
     const blocked = await run.execute({ argv: ["node", "-e", "console.log('nope')"] }, ctx());
     expect(blocked.ok).toBe(false);

@@ -32,6 +32,11 @@ export {
 } from "./firstmateTools.js";
 
 export {
+  createFirstmateLoopTools,
+  selectionShouldReceiveFirstmateTools
+} from "./firstmateToolLoop.js";
+
+export {
   createFirstmateRouter,
   createFirstmateRouteApp,
   type FirstmateRouteDeps

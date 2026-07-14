@@ -35,8 +35,7 @@ export type McpClientFactory = (
 ) => Promise<McpClient>;
 
 /**
- * Default factory: supports only transport "fake" via Fake registry.
- * Real stdio/http clients can be layered later without changing the service API.
+ * Default factory: fake transport for tests; real HTTP / stdio for production.
  */
 export function createDefaultMcpClientFactory(
   resolveFake?: (id: string) => McpClient | undefined
@@ -54,23 +53,12 @@ export function createDefaultMcpClientFactory(
       return client;
     }
     if (connection.transport === "http") {
-      if (!connection.url) {
-        throw new McpClientUnavailableError("HTTP MCP connection is missing url.", "server_unavailable");
-      }
-      // Placeholder until full SDK HTTP transport is wired; keeps service testable.
-      throw new McpClientUnavailableError(
-        "HTTP MCP transport is not configured in this build; inject a client factory for live servers.",
-        "server_unavailable"
-      );
+      const { createHttpMcpClient } = await import("./mcpHttpStdioClients.js");
+      return createHttpMcpClient(connection, secrets);
     }
     if (connection.transport === "stdio") {
-      if (!connection.command) {
-        throw new McpClientUnavailableError("stdio MCP connection is missing command.", "server_unavailable");
-      }
-      throw new McpClientUnavailableError(
-        "stdio MCP transport is not configured in this build; inject a client factory for live servers.",
-        "server_unavailable"
-      );
+      const { createStdioMcpClient } = await import("./mcpHttpStdioClients.js");
+      return createStdioMcpClient(connection, secrets);
     }
     throw new McpClientUnavailableError(
       `Unsupported MCP transport: ${String((connection as McpConnection).transport)}`,

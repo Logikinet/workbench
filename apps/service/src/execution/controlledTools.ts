@@ -399,7 +399,15 @@ function runCommandTool(options: ControlledToolsOptions): ToolDefinition {
           result.stderr ? `stderr:\n${result.stderr}` : ""
         ].filter(Boolean).join("\n");
         const summary = clip(combined, ctx.maxOutputBytes);
-        const evidencePath = `evidence/command-${safeSlug(argv.join("-"))}.log`;
+        const evidencePath = `evidence/command-${safeSlug(argv.join("-"))}-${Date.now()}.log`;
+        // Persist evidence so Reviewer / users can open a real file path.
+        try {
+          const absEvidence = resolveWorkspacePath(options.workspacePath, evidencePath);
+          await mkdir(dirname(absEvidence), { recursive: true });
+          await writeFile(absEvidence, combined, "utf8");
+        } catch {
+          // Evidence write is best-effort; tool result still carries the summary.
+        }
         return {
           ok: result.exitCode === 0 && !result.timedOut,
           summary,
@@ -412,7 +420,8 @@ function runCommandTool(options: ControlledToolsOptions): ToolDefinition {
           data: {
             argv,
             exitCode: result.exitCode,
-            timedOut: result.timedOut === true
+            timedOut: result.timedOut === true,
+            evidencePath
           }
         };
       } catch (error) {

@@ -711,6 +711,14 @@ export class RunService {
     return this.mutate(() => this.finishProfessionalExecutionUnsafe(runId, summary));
   }
 
+  /**
+   * After one subtask agent finishes, re-open the Run so the next DAG frontier
+   * agent can start without creating a new Run.
+   */
+  async prepareContinuedExecution(runId: string, summary: string): Promise<Run> {
+    return this.mutate(() => this.prepareContinuedExecutionUnsafe(runId, summary));
+  }
+
   async failProfessionalExecution(runId: string, errorMessage: string): Promise<Run> {
     return this.mutate(() => this.failProfessionalExecutionUnsafe(runId, errorMessage));
   }
@@ -1398,6 +1406,42 @@ export class RunService {
     this.appendTimeline(run, "agent_status", "执行已结束；等待独立 Reviewer 审查，不得直接标记完成。", now);
     await this.persist();
     await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
+    return run;
+  }
+
+  private async prepareContinuedExecutionUnsafe(runId: string, summary: string): Promise<Run> {
+    const run = await this.get(runId);
+    const now = new Date().toISOString();
+    // Only re-open when a prior agent wave finished (or is idle after partial work).
+    if (run.execution.status === "running") return run;
+    if (
+      run.execution.status !== "succeeded"
+      && run.execution.status !== "failed"
+      && run.execution.status !== "idle"
+    ) {
+      return run;
+    }
+    if (run.status === "cancelled" || run.status === "completed") {
+      throw new Error("Cannot continue orchestration on a cancelled or completed Run.");
+    }
+    run.execution = {
+      ...run.execution,
+      status: "idle",
+      retryable: true,
+      lastError: undefined,
+      activeStep: undefined,
+      pendingApproval: undefined,
+      completedAt: undefined
+    };
+    run.status = "queued";
+    this.appendTimeline(
+      run,
+      "agent_status",
+      summary.trim() || "子任务已推进；准备启动下一执行代理。",
+      now
+    );
+    await this.persist();
+    await this.todos.update(run.todoId, { status: "running" }).catch(() => undefined);
     return run;
   }
 

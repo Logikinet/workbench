@@ -559,6 +559,23 @@ export function reconcileRunSelection(runIds: string[], currentId: string): stri
   return runIds.includes(currentId) ? currentId : (runIds[0] ?? "");
 }
 
+/**
+ * Plan approval may return `{ run, orchestration }` when post-plan orchestration is enabled.
+ * Always surface a bare RunRecord to UI state.
+ */
+export function unwrapRunRecord(body: RunRecord | { run: RunRecord; orchestration?: unknown } | null | undefined): RunRecord {
+  if (!body || typeof body !== "object") {
+    throw new Error("服务返回了无效的 Run 数据。");
+  }
+  if ("run" in body && body.run && typeof body.run === "object" && "id" in body.run) {
+    return body.run;
+  }
+  if ("id" in body && typeof (body as RunRecord).id === "string") {
+    return body as RunRecord;
+  }
+  throw new Error("服务返回了无效的 Run 数据。");
+}
+
 export function createRunClient(serviceUrl: string) {
   const requestJson = createJsonRequest(serviceUrl);
   return {
@@ -602,11 +619,17 @@ export function createRunClient(serviceUrl: string) {
         method: "PATCH",
         body: JSON.stringify(payload)
       }),
-    decidePlan: (runId: string, payload: { decision: "approved" | "returned" | "cancelled"; summary: string }) =>
-      requestJson<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/plan-decisions`, {
-        method: "POST",
-        body: JSON.stringify(payload)
-      }),
+    decidePlan: async (runId: string, payload: { decision: "approved" | "returned" | "cancelled"; summary: string }) => {
+      // Server may return either a bare RunRecord or { run, orchestration } after approve.
+      const body = await requestJson<RunRecord | { run: RunRecord; orchestration?: unknown }>(
+        `/api/runs/${encodeURIComponent(runId)}/plan-decisions`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload)
+        }
+      );
+      return unwrapRunRecord(body);
+    },
     listAskUser: (runId: string) =>
       requestJson<{ runId: string; requests: AskUserRequestRecord[]; pending: AskUserRequestRecord[]; queued: AskUserRequestRecord[] }>(
         `/api/runs/${encodeURIComponent(runId)}/ask-user`

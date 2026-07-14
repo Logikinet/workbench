@@ -89,6 +89,15 @@ export interface CodexCliServiceOptions {
   runtimeAdapter?: RuntimeAdapter;
   /** Optional injected Codex harness port (defaults to createCodexCliPortFromRunner). */
   harnessPort?: CodexCliHarnessPort;
+  /**
+   * Fired after Codex CLI settles (success or failure/pause).
+   * Used by continuous DAG orchestration — errors are swallowed.
+   */
+  onExecutionSettled?: (event: {
+    runId: string;
+    outcome: "completed" | "failed";
+    summary?: string;
+  }) => void | Promise<void>;
 }
 
 interface ActiveCodexExecution {
@@ -121,6 +130,8 @@ export class CodexCliService {
   private readonly active = new Map<string, ActiveCodexExecution>();
   private readonly completions = new Map<string, Promise<void>>();
   private readonly completionOrder: string[] = [];
+  /** Outcome recorded by observeCompletion; flushed after clearActive. */
+  private readonly pendingSettled = new Map<string, { outcome: "completed" | "failed"; summary?: string }>();
   private readonly runtime: CodexCliRuntime;
   private readonly harnessPort: CodexCliHarnessPort;
   private readonly runtimeAdapter: RuntimeAdapter;
@@ -260,16 +271,15 @@ export class CodexCliService {
       this.forwardOutput(runId, active, process.stderr, "stderr");
       active.completion = this.observeCompletion(runId, active);
       this.rememberCompletion(runId, active.completion);
-      void active.completion.then(
-        () => {
-          this.clearActive(runId, active);
-          this.releaseQueue(runId);
-        },
-        () => {
-          this.clearActive(runId, active);
-          this.releaseQueue(runId);
+      void active.completion.finally(async () => {
+        this.clearActive(runId, active);
+        this.releaseQueue(runId);
+        const settled = this.pendingSettled.get(runId);
+        this.pendingSettled.delete(runId);
+        if (settled) {
+          await this.notifySettled(runId, settled.outcome, settled.summary);
         }
-      );
+      });
       if (active.terminating) await this.abort(runId);
       return started;
     } catch (error) {
@@ -543,7 +553,9 @@ export class CodexCliService {
       );
       // Index Diff/evidence while execution is still authorized, then finish for review.
       await this.indexArtifactsAfterCodex(runId, "success");
-      await this.options.runs.finishProfessionalExecution(runId, "Codex CLI 已完成执行，等待审查。");
+      const completeSummary = "Codex CLI 已完成执行，等待审查。";
+      await this.options.runs.finishProfessionalExecution(runId, completeSummary);
+      this.pendingSettled.set(runId, { outcome: "completed", summary: completeSummary });
       return;
     }
     const message = await this.completionFailureMessage(result, active.diagnosticTail);
@@ -562,6 +574,20 @@ export class CodexCliService {
     );
     await this.indexArtifactsAfterCodex(runId, "failure");
     await this.pauseAfterFailure(runId, message);
+    this.pendingSettled.set(runId, { outcome: "failed", summary: message });
+  }
+
+  private async notifySettled(
+    runId: string,
+    outcome: "completed" | "failed",
+    summary?: string
+  ): Promise<void> {
+    if (!this.options.onExecutionSettled) return;
+    try {
+      await this.options.onExecutionSettled({ runId, outcome, summary });
+    } catch {
+      // Continuous orchestration must never break Codex cleanup.
+    }
   }
 
   /** Persist a unified RuntimeEvent onto the Run timeline (secret-free). */
