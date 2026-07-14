@@ -123,6 +123,22 @@ select { border: 1px solid #3a4b69; border-radius: 8px; padding: 10px 12px; colo
 .plan-history details > strong { display: block; margin-top: 8px; }
 .plan-history details ul, .plan-history details ol { margin: 4px 0 8px; padding-left: 20px; }
 .plan-decisions textarea { flex: 1 1 100%; }
+.plan-diff { margin-top: 6px; color: #fde68a; }
+.plan-diff ul { margin: 6px 0 0; padding-left: 18px; color: #fef3c7; }
+.ask-user-panel { display: grid; gap: 12px; margin-top: 16px; padding: 14px; border: 1px solid #0e7490; border-radius: 10px; background: #0f2740; }
+.ask-user-panel h4 { margin: 0; }
+.ask-user-panel .eyebrow { margin: 0 0 4px; }
+.ask-user-card { display: grid; gap: 8px; padding: 12px; border-radius: 8px; background: #101826; border: 1px solid #164e63; }
+.ask-user-card-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: #b7c6dd; font-size: .85rem; }
+.ask-user-prompt { margin: 0; font-weight: 600; color: #eff6ff; }
+.ask-user-reason { margin: 0; color: #94a3b8; font-size: .9rem; }
+.ask-user-options { display: grid; gap: 6px; }
+.ask-user-option { display: flex; gap: 8px; align-items: center; color: #dce8f8; }
+.ask-user-card textarea { min-height: 72px; border: 1px solid #3a4b69; border-radius: 8px; padding: 10px 12px; color: #eff6ff; background: #0b1220; font: inherit; }
+.ask-user-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.ask-user-queue ul, .ask-user-history ul { margin: 8px 0 0; padding-left: 18px; color: #b7c6dd; }
+.ask-user-queue li, .ask-user-history li { margin-bottom: 6px; }
+.ask-user-queue small, .ask-user-history p { display: block; color: #94a3b8; font-size: .8rem; }
 .review-panel { display: grid; gap: 12px; margin-top: 16px; padding: 14px; border: 1px solid #5b4b8a; border-radius: 10px; background: #1a1630; }
 .review-panel h4, .review-panel p { margin: 0; }
 .review-panel > p { color: #c4b5fd; }

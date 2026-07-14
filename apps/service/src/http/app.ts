@@ -15,7 +15,17 @@ import type { ConnectionService, ModelConnection } from "../connections/connecti
 import type { AgentRole, CreateRoleInput, RoleService, UpdateRoleInput } from "../roles/roleService.js";
 import type { ProfessionalAgentService, StartProfessionalAgentInput, TemporaryProfessionalAgentInput } from "../execution/professionalAgentService.js";
 import type { CodexCliService } from "../codex/codexCliService.js";
+import {
+  assessWorktreeArtifactConsistency,
+  findCodexWorktreeEvidence
+} from "../codex/codexArtifactIndex.js";
 import type { GitWorktreeService } from "../git/gitWorktreeService.js";
+import { registerWorktreeApplyRoutes } from "../git/worktreeRoutes.js";
+import { mountConnectionRoutes } from "../connections/connectionRoutes.js";
+import { mountProviderRoutes } from "../providers/providerRoutes.js";
+import { createPlanningRouter } from "../planning/planningRoutes.js";
+import type { AiPlanningService } from "../planning/aiPlanningService.js";
+import { createAskUserRouter } from "../askUser/askUserRoutes.js";
 import type { ReviewService } from "../review/reviewService.js";
 import type { BackupService } from "../backup/backupService.js";
 import type { QueueConfigUpdate, RunQueueService } from "../queue/runQueueService.js";
@@ -34,10 +44,15 @@ export interface ServiceAppOptions {
   roles?: RoleService;
   professionalAgents?: ProfessionalAgentService;
   codexCli?: CodexCliService;
-  worktrees?: Pick<GitWorktreeService, "get" | "captureDiff" | "runApprovedChecks" | "discard">;
+  worktrees?: Pick<
+    GitWorktreeService,
+    "get" | "captureDiff" | "runApprovedChecks" | "discard" | "previewApply" | "applyToMain" | "keepPending"
+  >;
   reviews?: ReviewService;
   backup?: BackupService;
   queue?: RunQueueService;
+  /** Task 18: AI Firstmate/Secondmate planning (optional until ModelRuntime is wired). */
+  aiPlanning?: AiPlanningService;
 }
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -97,9 +112,41 @@ export function createApp(options: ServiceAppOptions): Express {
     response.json({
       status: "online",
       version: options.version,
-      capabilities: ["projects", "todos", "backup", "queue"]
+      capabilities: [
+        "projects",
+        "todos",
+        "backup",
+        "queue",
+        ...(options.connections ? (["connections", "providers"] as const) : []),
+        ...(options.worktrees ? (["worktree-apply"] as const) : []),
+        ...(options.aiPlanning ? (["ai-planning"] as const) : []),
+        ...(options.runs ? (["ask-user"] as const) : [])
+      ]
     });
   });
+
+  // Task 39: enhanced connection diagnostics + provider presets (no secrets in responses).
+  if (options.connections) {
+    mountConnectionRoutes(app, options.connections);
+    mountProviderRoutes(app);
+  }
+
+  // Task 18: optional AI planning endpoint (does not mutate formal files).
+  if (options.aiPlanning && options.runs && options.todos) {
+    app.use(
+      createPlanningRouter({
+        aiPlanning: options.aiPlanning,
+        runs: options.runs,
+        todos: options.todos,
+        projects: options.projects
+      })
+    );
+  }
+
+  // Task 19: structured AskUser / AskApproval / AskReplan cards.
+  if (options.runs) {
+    app.use(createAskUserRouter(options.runs));
+  }
 
   app.get("/api/queue/config", async (_request, response) => {
     if (!options.queue) return response.status(503).json({ error: "Queue service is not ready." });
@@ -350,11 +397,57 @@ export function createApp(options: ServiceAppOptions): Express {
   app.get("/api/runs/:runId/worktree", async (request, response) => {
     if (!options.worktrees || !options.runs) return response.status(503).json({ error: "Git worktree and Run services are not ready." });
     try {
-      const [session, diff] = await Promise.all([
-        options.worktrees.get(request.params.runId),
-        options.worktrees.captureDiff(request.params.runId)
-      ]);
-      response.json({ session, ...diff });
+      const runId = request.params.runId;
+      let run = await options.runs.get(runId);
+      let session: Awaited<ReturnType<GitWorktreeService["get"]>> | null = null;
+      let changedFiles: string[] = [];
+      let diff = "";
+      try {
+        session = await options.worktrees.get(runId);
+      } catch {
+        session = null;
+      }
+
+      const assessment = assessWorktreeArtifactConsistency(run, session);
+      if (assessment.needsUpdate) {
+        run = await options.runs.reconcileWorktreeArtifactConsistency(runId, {
+          sessionStatus: assessment.sessionStatus,
+          consistency: assessment.consistency,
+          consistencyNote: assessment.consistencyNote
+        });
+      }
+
+      if (session?.status === "active") {
+        const captured = await options.worktrees.captureDiff(runId);
+        changedFiles = captured.changedFiles;
+        diff = captured.diff;
+      } else if (session?.status === "discarded") {
+        // History lives on the normalized artifact evidence after discard.
+        const evidence = findCodexWorktreeEvidence(run);
+        changedFiles = evidence?.changedFiles ?? [];
+        diff = evidence?.diff ?? "";
+      } else {
+        const evidence = findCodexWorktreeEvidence(run);
+        changedFiles = evidence?.changedFiles ?? [];
+        diff = evidence?.diff ?? "";
+      }
+
+      const evidence = findCodexWorktreeEvidence(run);
+      response.json({
+        session: session ?? {
+          runId,
+          status: "missing" as const,
+          workspacePath: evidence?.worktreePath ?? "",
+          mainWorkspacePath: "",
+          verificationResults: evidence?.verificationResults ?? []
+        },
+        changedFiles,
+        diff,
+        /** Same normalized result Reviewer uses — not log keyword scraping. */
+        artifactEvidence: evidence ?? null,
+        consistency: evidence?.consistency ?? assessment.consistency,
+        consistencyNote: evidence?.consistencyNote ?? assessment.consistencyNote
+      });
     } catch (error) {
       response.status(400).json({ error: error instanceof Error ? error.message : "Unable to read Git worktree diff." });
     }
@@ -390,12 +483,28 @@ export function createApp(options: ServiceAppOptions): Express {
       if (run.status === "running" || run.execution.status === "running" || run.execution.terminationUnconfirmed) {
         return response.status(409).json({ error: "An active or unconfirmed execution must stop before its Worktree can be discarded." });
       }
-      response.json(await options.worktrees.discard(request.params.runId));
+      const session = await options.worktrees.discard(request.params.runId);
+      // Keep Diff/evidence history on the Run; mark discarded for Reviewer/PWA.
+      await options.runs.markWorktreeArtifactsDiscarded(request.params.runId);
+      response.json(session);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to discard Git worktree.";
       response.status(isWorktreeBusyConflict(message) ? 409 : 400).json({ error: message });
     }
   });
+
+  // Task 27: accept apply / keep-pending (preview + merge into main; never auto-push).
+  if (options.worktrees) {
+    registerWorktreeApplyRoutes(app, {
+      worktrees: options.worktrees,
+      runs: options.runs
+        ? {
+            get: (runId) => options.runs!.get(runId),
+            markWorktreeArtifactsDiscarded: (runId) => options.runs!.markWorktreeArtifactsDiscarded(runId)
+          }
+        : undefined
+    });
+  }
 
   app.post("/api/runs/:runId/messages", async (request, response) => {
     if (!options.runs) return response.status(503).json({ error: "Run service is not ready." });
@@ -643,6 +752,20 @@ export function createApp(options: ServiceAppOptions): Express {
       return response.status(400).json({ error: "Acceptance decision and summary are required." });
     }
     try {
+      // Task 27: development Runs with unapplied Worktree changes cannot formally complete.
+      if (decision === "accepted" && options.worktrees) {
+        try {
+          const preview = await options.worktrees.previewApply(request.params.runId);
+          if (!preview.canCompleteDevRun) {
+            return response.status(409).json({
+              error: "开发型修改尚未应用到主工作区：请先「接受应用」或「放弃修改」后再验收完成。",
+              preview
+            });
+          }
+        } catch {
+          // No worktree session → gate open (non-code Runs).
+        }
+      }
       const result = decision === "accepted"
         ? await options.reviews.accept(request.params.runId, summary)
         : await options.reviews.reject(request.params.runId, summary);

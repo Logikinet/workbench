@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createRunClient, reconcileRunSelection, type RunRecord } from "../lib/runs.js";
 import type { TodoRecord } from "../lib/todos.js";
 import { PlanningApprovalPanel } from "./PlanningApprovalPanel.js";
+import { AskUserPanel } from "./AskUserPanel.js";
 import { ProfessionalAgentPanel } from "./ProfessionalAgentPanel.js";
 import { CodexHarnessPanel } from "./CodexHarnessPanel.js";
 import { GitWorktreePanel } from "./GitWorktreePanel.js";
@@ -46,10 +47,10 @@ export function RunTimelinePanel({ serviceUrl, todo, onClose, onTodoChange }: Ru
   }, [todo.id]);
 
   useEffect(() => {
-    if (selected?.execution.status !== "running") return;
+    if (selected?.execution.status !== "running" && selected?.status !== "waiting_for_user") return;
     const timer = window.setInterval(() => { void reload(); }, 1000);
     return () => window.clearInterval(timer);
-  }, [selected?.id, selected?.execution.status, todo.id]);
+  }, [selected?.id, selected?.execution.status, selected?.status, todo.id]);
 
   const createRun = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -143,6 +144,7 @@ function Timeline({
         <div><dt>成果</dt><dd>{run.artifacts.length}</dd></div>
         <div><dt>检查点</dt><dd>{run.checkpoints?.length ?? 0}</dd></div>
       </dl>
+      <AskUserPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} readOnly={readOnly} />
       <PlanningApprovalPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} readOnly={readOnly} />
       {!readOnly && run.planning?.approvalStatus === "approved" && <ProfessionalAgentPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} />}
       {!readOnly && run.planning?.approvalStatus === "approved" && (run.execution.status === "idle" || run.execution.selectedAgent?.harness === "codex-cli") && <CodexHarnessPanel serviceUrl={serviceUrl} run={run} onRunChange={onRunChange} onNotice={onNotice} />}

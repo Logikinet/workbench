@@ -12,6 +12,8 @@ import { ReviewService } from "./review/reviewService.js";
 import { createBackupService } from "./backup/createBackupWiring.js";
 import { ResourceGuardService } from "./queue/resourceGuardService.js";
 import { RunQueueService } from "./queue/runQueueService.js";
+import { ModelRuntime } from "./model/modelRuntime.js";
+import { AiPlanningService } from "./planning/aiPlanningService.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -64,6 +66,46 @@ async function main(): Promise<void> {
     connections,
     appVersion: serviceVersion
   });
+  const modelRuntime = new ModelRuntime({ roles, connections });
+  const roleList = await roles.list();
+  const firstmateRole =
+    roleList.find((role) => /firstmate/i.test(role.name)) ??
+    roleList.find((role) => role.harness === "api" && role.enabled);
+  const secondmateRole =
+    roleList.find((role) => /secondmate/i.test(role.name)) ??
+    roleList.find((role) => role.id !== firstmateRole?.id && role.harness === "api" && role.enabled) ??
+    firstmateRole;
+  const aiPlanning =
+    firstmateRole && secondmateRole
+      ? new AiPlanningService({
+          modelRuntime,
+          firstmateRoleId: firstmateRole.id,
+          secondmateRoleId: secondmateRole.id
+        })
+      : undefined;
+
+  // Task 18: AI is default planning path when API roles exist; template remains fallback.
+  if (aiPlanning) {
+    runs.configurePlanning({
+      aiPlanning,
+      resolveProject: async (todoId) => {
+        const todo = await todos.get(todoId);
+        if (!todo.projectId) return undefined;
+        try {
+          const project = await projects.get(todo.projectId);
+          return {
+            id: project.id,
+            name: project.name,
+            summary: project.summary,
+            workspacePath: project.workspacePath
+          };
+        } catch {
+          return undefined;
+        }
+      }
+    });
+  }
+
   const webRoot = process.env.PAW_WEB_DIST?.trim() || undefined;
   const app = createApp({
     version: serviceVersion,
@@ -78,7 +120,8 @@ async function main(): Promise<void> {
     worktrees,
     reviews,
     backup,
-    queue
+    queue,
+    aiPlanning
   });
 
   // Bind loopback only — never expose the Agent Service on LAN interfaces.

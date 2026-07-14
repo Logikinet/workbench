@@ -3,14 +3,27 @@ import { constants } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { TodoService } from "../todos/todoService.js";
+import type { AiPlanningService, AiGeneratedPlan, AiTaskAssessment } from "../planning/aiPlanningService.js";
+import type { PlanningProjectFacts } from "../planning/planningContext.js";
+import { computePlanVersionDiff, type PlanVersionDiff } from "../planning/planDiff.js";
 import {
   assessTask,
   defaultVerificationCommands,
   generateSecondmatePlan,
+  type GeneratedPlan,
   type PlanComplexity,
   type TaskAssessment,
   type TaskType
 } from "../planning/planningService.js";
+import {
+  answerAskUserRequest,
+  criticalInputsToAskUser,
+  enqueueAskUser,
+  hasPendingAskUser,
+  type AnswerAskUserInput,
+  type AskUserRequest,
+  type CreateAskUserInput
+} from "../askUser/askUserService.js";
 import {
   actionKindFromStep,
   createEmptyFingerprint,
@@ -32,6 +45,7 @@ export {
 export const runStatuses = [
   "created",
   "planning",
+  "waiting_for_user",
   "awaiting_plan_approval",
   "queued",
   "running",
@@ -65,7 +79,8 @@ export type TimelineKind =
   | "review"
   | "artifact"
   | "approval"
-  | "checkpoint";
+  | "checkpoint"
+  | "ask_user";
 
 export type CheckpointActionKind =
   | "write_file"
@@ -190,6 +205,12 @@ export interface PlanVersionIndex {
   generatedBy?: "secondmate";
   revisionNote?: string;
   verificationCommands?: string[][];
+  dependencies?: string[];
+  expectedArtifacts?: string[];
+  allowedScope?: string[];
+  verificationMethods?: string[];
+  /** Present when this version was produced from a prior plan (return / replan). */
+  diffFromPrevious?: PlanVersionDiff;
 }
 
 export type PlanApprovalStatus = "awaiting_input" | "awaiting_approval" | "approved" | "cancelled";
@@ -349,12 +370,50 @@ export interface ApprovalRecord {
   createdAt: string;
 }
 
+/** Structured verification row shared by Reviewer and PWA — use `passed`, not log keywords. */
+export interface ArtifactVerificationEvidence {
+  command: string[];
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  /** True only when exitCode is exactly 0. */
+  passed: boolean;
+}
+
+/**
+ * Normalized Codex Worktree evidence attached to Run artifacts.
+ * Reviewer and PWA must consume this object rather than scraping logs for "passed".
+ */
+export interface WorktreeArtifactEvidence {
+  source: "codex-worktree";
+  worktreeRunId: string;
+  worktreePath?: string;
+  baselineCommit?: string;
+  sessionStatus: "active" | "discarded" | "missing";
+  changeStatus: "modified" | "no_modification";
+  discarded: boolean;
+  changedFiles: string[];
+  /** Full unified diff when modified; empty when no_modification. */
+  diff?: string;
+  verificationResults: ArtifactVerificationEvidence[];
+  summary: string;
+  consistency?: "ok" | "missing_worktree" | "stale";
+  consistencyNote?: string;
+}
+
 export interface ArtifactIndex {
   id: string;
   path: string;
   kind: string;
   createdAt: string;
+  /** Optional structured evidence (Codex Worktree indexing). */
+  evidence?: WorktreeArtifactEvidence;
 }
+
+/** Kind for the single normalized Codex → Diff → Artifact evidence bundle. */
+export const CODEX_WORKTREE_EVIDENCE_KIND = "codex-worktree-evidence";
+/** Kind for each real changed file registered from an isolated Worktree. */
+export const CODEX_WORKTREE_FILE_KIND = "worktree-file";
 
 export interface Run {
   id: string;
@@ -373,9 +432,23 @@ export interface Run {
   artifacts: ArtifactIndex[];
   checkpoints: RunCheckpoint[];
   checkpointRecovery?: CheckpointRecoveryState;
+  /** Structured AskUser / AskApproval / AskReplan cards (persisted across restart). */
+  askUserRequests: AskUserRequest[];
+  /** Status to restore after the last pending AskUser is answered (when not re-planning). */
+  waitingForUserResume?: {
+    previousStatus: RunStatus;
+    since: string;
+  };
   timeline: TimelineEvent[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RunServicePlanningConfig {
+  /** When set, Firstmate/Secondmate AI is the default planning path. */
+  aiPlanning?: AiPlanningService;
+  /** Optional project facts resolver for AI planning context. */
+  resolveProject?: (todoId: string) => Promise<PlanningProjectFacts | undefined>;
 }
 
 interface RunState {
@@ -395,12 +468,20 @@ function emptyState(): RunState {
 export class RunService {
   private readonly executionInterruptionHandlers = new Set<(runId: string) => unknown>();
   private mutationTail: Promise<void> = Promise.resolve();
+  private aiPlanning?: AiPlanningService;
+  private resolveProject?: (todoId: string) => Promise<PlanningProjectFacts | undefined>;
 
   private constructor(
     private readonly statePath: string,
     private state: RunState,
     private readonly todos: TodoService
   ) {}
+
+  /** Wire AI Firstmate/Secondmate after open (roles/ModelRuntime may be constructed later). */
+  configurePlanning(config: RunServicePlanningConfig): void {
+    this.aiPlanning = config.aiPlanning;
+    this.resolveProject = config.resolveProject;
+  }
 
   static async open(statePath: string, todos: TodoService): Promise<RunService> {
     try {
@@ -416,6 +497,8 @@ export class RunService {
         return {
           ...run,
           approvals: run.approvals ?? [],
+          askUserRequests: Array.isArray(run.askUserRequests) ? run.askUserRequests : [],
+          waitingForUserResume: run.waitingForUserResume,
           checkpoints: persistedCheckpoints,
           checkpointRecovery: normalizeCheckpointRecovery(run.checkpointRecovery, persistedCheckpoints),
           reviewLoop: {
@@ -562,6 +645,21 @@ export class RunService {
     return this.mutate(() => this.decidePlanUnsafe(runId, input));
   }
 
+  /** Raise a structured AskUser / AskApproval / AskReplan card (blocks on waiting_for_user). */
+  async requestAskUser(runId: string, input: CreateAskUserInput): Promise<Run> {
+    return this.mutate(() => this.requestAskUserUnsafe(runId, input));
+  }
+
+  /** Answer a pending AskUser card and resume from its source.stepKey. */
+  async answerAskUser(runId: string, requestId: string, input: AnswerAskUserInput): Promise<Run> {
+    return this.mutate(() => this.answerAskUserUnsafe(runId, requestId, input));
+  }
+
+  async listAskUser(runId: string): Promise<AskUserRequest[]> {
+    const run = await this.get(runId);
+    return [...(run.askUserRequests ?? [])];
+  }
+
   async beginProfessionalExecution(
     runId: string,
     agent: ProfessionalAgentSelection,
@@ -659,6 +757,35 @@ export class RunService {
     return this.mutate(() => this.recordArtifactUnsafe(runId, input));
   }
 
+  /**
+   * Registers normalized Codex Worktree evidence on the Run.
+   * Allowed after success/fail/pause so indexing is not blocked by terminal execution status.
+   * Replaces any previous Codex worktree evidence for this Run (idempotent re-index).
+   */
+  async recordCodexWorktreeArtifacts(
+    runId: string,
+    input: {
+      evidence: WorktreeArtifactEvidence;
+      /** Real changed files only — empty when no_modification. */
+      changedFiles: string[];
+    }
+  ): Promise<Run> {
+    return this.mutate(() => this.recordCodexWorktreeArtifactsUnsafe(runId, input));
+  }
+
+  /** Keeps historical artifacts but marks Worktree evidence as discarded after worktree remove. */
+  async markWorktreeArtifactsDiscarded(runId: string): Promise<Run> {
+    return this.mutate(() => this.markWorktreeArtifactsDiscardedUnsafe(runId));
+  }
+
+  /** Updates consistency flags on Codex worktree evidence (e.g. after restart when worktree is missing). */
+  async reconcileWorktreeArtifactConsistency(
+    runId: string,
+    input: { sessionStatus: "active" | "discarded" | "missing"; consistency: "ok" | "missing_worktree" | "stale"; consistencyNote?: string }
+  ): Promise<Run> {
+    return this.mutate(() => this.reconcileWorktreeArtifactConsistencyUnsafe(runId, input));
+  }
+
   private async createUnsafe(todoId: string, initialMessage?: string, connectionId?: string): Promise<Run> {
     const todo = await this.todos.get(todoId);
     const now = new Date().toISOString();
@@ -677,12 +804,16 @@ export class RunService {
       approvals: [],
       artifacts: [],
       checkpoints: [],
+      askUserRequests: [],
       timeline: [],
       createdAt: now,
       updatedAt: now
     };
     if (initialMessage?.trim()) this.appendMessage(run, initialMessage.trim(), now);
-    this.initializePlanning(run, { title: todo.title, description: todo.description }, now);
+    await this.applyPlanningPipeline(run, {
+      title: todo.title,
+      description: todo.description
+    }, now);
     this.state.runs.push(run);
     await this.persist();
     await this.todos.update(todoId, { status: "awaiting_confirmation" });
@@ -704,6 +835,9 @@ export class RunService {
     if (run.status === "cancelled") throw new Error("A cancelled Run cannot be replanned; create a new Run instead.");
     if (run.execution.status === "running") throw new Error("An active Professional Agent must stop before planning changes.");
     if (run.planning?.approvalStatus === "cancelled") throw new Error("A cancelled plan cannot be updated; create a new Run instead.");
+    if (hasPendingAskUser(run.askUserRequests) && !input.additionalContext?.trim() && input.taskType === undefined && input.requiredCapabilities === undefined) {
+      throw new Error("This Run is waiting_for_user; answer the pending AskUser card or provide planning context.");
+    }
     const todo = await this.todos.get(run.todoId);
     if (input.requiredCapabilities !== undefined && normalizeCapabilities(input.requiredCapabilities).length === 0) {
       throw new Error("At least one required capability is required.");
@@ -713,22 +847,18 @@ export class RunService {
     }
     const now = new Date().toISOString();
     if (input.additionalContext?.trim()) this.appendMessage(run, input.additionalContext.trim(), now);
-    const assessment = assessTask(
-      { title: todo.title, description: todo.description, instructions: run.messages.map((message) => message.content).join("\n") },
-      { taskType: input.taskType, requiredCapabilities: input.requiredCapabilities }
-    );
-    run.planning = {
-      assessment,
-      approvalStatus: assessment.criticalInputs.length > 0 ? "awaiting_input" : "awaiting_approval",
-      verificationCommands: input.verificationCommands ?? defaultVerificationCommands(assessment.taskType)
-    };
-    this.appendFirstmateAssessment(run, now);
-    if (assessment.criticalInputs.length > 0) {
-      run.status = "planning";
-    } else {
-      run.status = "awaiting_plan_approval";
-      this.appendGeneratedPlan(run, now);
+    // User-provided context supersedes open critical-input asks so planning can proceed.
+    if (input.additionalContext?.trim() || input.taskType || input.requiredCapabilities) {
+      this.supersedeAsksForStep(run, "planning.critical_input", now, "用户已通过规划更新提供上下文。");
     }
+    await this.applyPlanningPipeline(run, {
+      title: todo.title,
+      description: todo.description
+    }, now, {
+      taskType: input.taskType,
+      requiredCapabilities: input.requiredCapabilities,
+      verificationCommands: input.verificationCommands
+    });
     await this.persist();
     await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
     return run;
@@ -739,22 +869,31 @@ export class RunService {
     this.assertTerminationConfirmed(run, "Plan version changes");
     if (run.status === "cancelled") throw new Error("A cancelled Run cannot receive another plan version; create a new Run instead.");
     if (run.execution.status === "running") throw new Error("An active Professional Agent must stop before planning changes.");
+    if (hasPendingAskUser(run.askUserRequests)) {
+      throw new Error("Cannot record a plan version while waiting_for_user on a pending AskUser card.");
+    }
     const todo = await this.todos.get(run.todoId);
     const now = new Date().toISOString();
+    const hadPlanning = Boolean(run.planning);
     if (!run.planning) {
-      run.planning = {
-        assessment: assessTask({ title: todo.title, description: todo.description, instructions: run.messages.map((message) => message.content).join("\n") }),
-        approvalStatus: "awaiting_input",
-        verificationCommands: []
-      };
-      this.appendFirstmateAssessment(run, now);
+      await this.applyPlanningPipeline(run, { title: todo.title, description: todo.description }, now);
     }
+    // Re-read after pipeline mutation (TS control-flow cannot see the in-place assignment).
+    if (!hadPlanning && run.planning?.assessment.criticalInputs.length) {
+      throw new Error("A critical input is required before a plan version can be recorded.");
+    }
+    if (!hadPlanning && run.planVersions.length > 0 && !input.revisionNote?.trim()) {
+      await this.persist();
+      await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
+      return run;
+    }
+    if (!run.planning) throw new Error("Firstmate assessment is required before generating a plan.");
     if (run.planning.approvalStatus === "cancelled") throw new Error("A cancelled plan cannot receive another version.");
     if (run.planning.assessment.criticalInputs.length > 0) throw new Error("A critical input is required before a plan version can be recorded.");
     run.planning.approvalStatus = "awaiting_approval";
     run.planning.approvedPlanVersion = undefined;
     run.status = "awaiting_plan_approval";
-    this.appendGeneratedPlan(run, now, input.revisionNote);
+    await this.appendGeneratedPlan(run, now, input.revisionNote);
     await this.persist();
     await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
     return run;
@@ -764,6 +903,9 @@ export class RunService {
     const run = await this.get(runId);
     this.assertTerminationConfirmed(run, "Plan decisions");
     if (run.status === "cancelled") throw new Error("A cancelled Run cannot receive a plan decision; create a new Run instead.");
+    if (run.status === "waiting_for_user" && hasPendingAskUser(run.askUserRequests)) {
+      throw new Error("Cannot decide a plan while waiting_for_user on a pending AskUser card.");
+    }
     const planning = run.planning;
     if (!planning || run.planVersions.length === 0 || planning.approvalStatus === "awaiting_input") {
       throw new Error("A Secondmate plan is required before a decision can be recorded.");
@@ -787,7 +929,8 @@ export class RunService {
       planning.approvalStatus = "awaiting_approval";
       planning.approvedPlanVersion = undefined;
       run.status = "awaiting_plan_approval";
-      this.appendGeneratedPlan(run, now, input.summary.trim());
+      // Real plan revision from feedback (AI when available, template fallback otherwise).
+      await this.appendGeneratedPlan(run, now, input.summary.trim());
     } else {
       planning.approvalStatus = "cancelled";
       planning.approvedPlanVersion = undefined;
@@ -796,6 +939,129 @@ export class RunService {
     }
     await this.persist();
     await this.todos.update(run.todoId, { status: "pending" });
+    return run;
+  }
+
+  private async requestAskUserUnsafe(runId: string, input: CreateAskUserInput): Promise<Run> {
+    const run = await this.get(runId);
+    this.assertTerminationConfirmed(run, "AskUser");
+    if (run.status === "cancelled" || run.status === "completed") {
+      throw new Error("Cannot raise AskUser on a terminal Run.");
+    }
+    if (run.execution.status === "running" && input.kind !== "ask_approval") {
+      // Allow ask_approval during execution; other asks require pause discipline from caller.
+    }
+    const now = new Date().toISOString();
+    const previousStatus = run.status === "waiting_for_user"
+      ? (run.waitingForUserResume?.previousStatus ?? "planning")
+      : run.status;
+    const { requests, created, mergedInto } = enqueueAskUser(run.askUserRequests ?? [], input, now);
+    run.askUserRequests = requests;
+    if (mergedInto) {
+      this.appendTimeline(
+        run,
+        "ask_user",
+        `Firstmate 合并了来自 ${created.source.agent} 的问题到已有卡片（避免重复打扰）；恢复位置：${mergedInto.source.stepKey}`,
+        now
+      );
+    } else {
+      this.appendTimeline(
+        run,
+        "ask_user",
+        `${created.kind} 来自 ${created.source.agent}：${created.prompt}（原因：${created.reason}；恢复位置：${created.source.stepKey}；状态：${created.status}）`,
+        now
+      );
+    }
+    if (hasPendingAskUser(run.askUserRequests)) {
+      if (run.status !== "waiting_for_user") {
+        run.waitingForUserResume = { previousStatus, since: now };
+      }
+      run.status = "waiting_for_user";
+      this.appendTimeline(run, "agent_status", "Run 进入 waiting_for_user；在用户回答前不会继续消耗模型或执行后续步骤。", now);
+    }
+    await this.persist();
+    await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
+    return run;
+  }
+
+  private async answerAskUserUnsafe(runId: string, requestId: string, input: AnswerAskUserInput): Promise<Run> {
+    const run = await this.get(runId);
+    this.assertTerminationConfirmed(run, "AskUser answer");
+    if (!run.askUserRequests?.length) throw new Error("This Run has no AskUser requests.");
+    const now = new Date().toISOString();
+    const { requests, result } = answerAskUserRequest(run.askUserRequests, requestId, input, now);
+    run.askUserRequests = requests;
+
+    const answerSummary = formatAskAnswerSummary(result.request);
+    this.appendTimeline(
+      run,
+      "ask_user",
+      `用户回答 ${result.request.kind}（来源 ${result.request.source.agent}，恢复位置 ${result.resumeStepKey}）：${answerSummary}`,
+      now
+    );
+
+    // Return content precisely into the original step pipeline.
+    if (result.request.kind === "ask_user" || result.request.kind === "ask_replan") {
+      const text = result.request.answer?.freeText
+        ?? result.request.answer?.replanFeedback
+        ?? result.request.answer?.selectedOptionIds?.join(", ");
+      if (text?.trim()) this.appendMessage(run, text.trim(), now);
+    }
+
+    if (result.nextPending) {
+      run.status = "waiting_for_user";
+      this.appendTimeline(
+        run,
+        "ask_user",
+        `队列中的下一问题已提升为 pending：${result.nextPending.prompt}（恢复位置：${result.nextPending.source.stepKey}）`,
+        now
+      );
+      await this.persist();
+      await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
+      return run;
+    }
+
+    const resumeAfterAnswer = run.waitingForUserResume?.previousStatus;
+    run.waitingForUserResume = undefined;
+    const stepKey = result.resumeStepKey;
+
+    if (result.request.kind === "ask_replan" || stepKey === "planning.replan" || stepKey.startsWith("planning.replan")) {
+      const feedback = result.replanFeedback ?? result.request.answer?.freeText ?? "请根据用户反馈修订计划。";
+      const todo = await this.todos.get(run.todoId);
+      if (!run.planning) {
+        await this.applyPlanningPipeline(run, { title: todo.title, description: todo.description }, now, {
+          revisionNote: feedback
+        });
+      } else {
+        run.planning.approvalStatus = "awaiting_approval";
+        run.planning.approvedPlanVersion = undefined;
+        run.status = "awaiting_plan_approval";
+        await this.appendGeneratedPlan(run, now, feedback);
+      }
+    } else if (stepKey === "planning.critical_input" || stepKey.startsWith("planning.")) {
+      const todo = await this.todos.get(run.todoId);
+      await this.applyPlanningPipeline(run, { title: todo.title, description: todo.description }, now);
+    } else if (result.request.kind === "ask_approval") {
+      const approved = result.request.answer?.approved;
+      this.appendTimeline(
+        run,
+        "approval",
+        approved === false ? "用户拒绝了 AskApproval 请求。" : "用户批准了 AskApproval 请求。",
+        now
+      );
+      run.status = resumeAfterAnswer && resumeAfterAnswer !== "waiting_for_user"
+        ? resumeAfterAnswer
+        : (run.planning?.approvalStatus === "approved" ? "paused" : "planning");
+    } else {
+      run.status = resumeAfterAnswer && resumeAfterAnswer !== "waiting_for_user" ? resumeAfterAnswer : "planning";
+    }
+
+    if (hasPendingAskUser(run.askUserRequests)) {
+      run.status = "waiting_for_user";
+    }
+
+    await this.persist();
+    await this.todos.update(run.todoId, { status: "awaiting_confirmation" });
     return run;
   }
 
@@ -1186,6 +1452,9 @@ export class RunService {
     const run = await this.get(runId);
     this.assertTerminationConfirmed(run, operation);
     this.assertApprovedPlan(run, operation);
+    if (run.status === "waiting_for_user" || hasPendingAskUser(run.askUserRequests)) {
+      throw new Error(`${operation} is blocked while waiting_for_user; answer the pending AskUser card first.`);
+    }
     if (
       run.status === "paused"
       || run.status === "cancelled"
@@ -1427,22 +1696,11 @@ export class RunService {
     if (requiresReapproval) {
       const todo = await this.todos.get(run.todoId);
       const prior = run.planning?.assessment;
-      const assessment = assessTask(
-        { title: todo.title, description: todo.description, instructions: run.messages.map((message) => message.content).join("\n") },
-        prior ? { taskType: prior.taskType, requiredCapabilities: prior.requiredCapabilities } : {}
-      );
-      run.planning = {
-        assessment,
-        approvalStatus: assessment.criticalInputs.length > 0 ? "awaiting_input" : "awaiting_approval",
-        verificationCommands: defaultVerificationCommands(assessment.taskType)
-      };
-      this.appendFirstmateAssessment(run, now);
-      if (assessment.criticalInputs.length > 0) {
-        run.status = "planning";
-      } else {
-        run.status = "awaiting_plan_approval";
-        this.appendGeneratedPlan(run, now, instruction);
-      }
+      await this.applyPlanningPipeline(run, { title: todo.title, description: todo.description }, now, {
+        taskType: prior?.taskType,
+        requiredCapabilities: prior?.requiredCapabilities,
+        revisionNote: instruction
+      });
     } else if (run.execution.selectedAgent) {
       run.execution.retryable = true;
       if (run.status !== "queued" && run.status !== "running") run.status = "paused";
@@ -1699,23 +1957,293 @@ export class RunService {
     return run;
   }
 
-  private initializePlanning(run: Run, subject: { title: string; description?: string }, now: string): void {
-    const assessment = assessTask({
-      ...subject,
-      instructions: run.messages.map((message) => message.content).join("\n")
+  private async recordCodexWorktreeArtifactsUnsafe(
+    runId: string,
+    input: {
+      evidence: WorktreeArtifactEvidence;
+      changedFiles: string[];
+    }
+  ): Promise<Run> {
+    const run = await this.get(runId);
+    this.assertTerminationConfirmed(run, "Codex Worktree Artifact indexing");
+    this.assertApprovedPlan(run, "Codex Worktree Artifact indexing");
+    const evidence = input.evidence;
+    if (evidence.source !== "codex-worktree" || evidence.worktreeRunId !== runId) {
+      throw new Error("Codex Worktree evidence must be bound to the current Run.");
+    }
+    const now = new Date().toISOString();
+    // Drop prior Codex worktree index entries so re-runs replace rather than accumulate fakes.
+    run.artifacts = run.artifacts.filter(
+      (artifact) =>
+        artifact.kind !== CODEX_WORKTREE_EVIDENCE_KIND
+        && artifact.kind !== CODEX_WORKTREE_FILE_KIND
+        && artifact.evidence?.source !== "codex-worktree"
+    );
+
+    const bundlePath = `worktree/${runId}`;
+    run.artifacts.push({
+      id: randomUUID(),
+      path: bundlePath,
+      kind: CODEX_WORKTREE_EVIDENCE_KIND,
+      createdAt: now,
+      evidence: { ...evidence, changedFiles: [...evidence.changedFiles] }
     });
-      run.planning = {
-        assessment,
-        approvalStatus: assessment.criticalInputs.length > 0 ? "awaiting_input" : "awaiting_approval",
-        verificationCommands: defaultVerificationCommands(assessment.taskType)
+    this.appendTimeline(run, "artifact", evidence.summary, now);
+
+    if (evidence.changeStatus === "modified") {
+      for (const filePath of input.changedFiles) {
+        const normalized = filePath.trim();
+        if (!normalized) continue;
+        run.artifacts.push({
+          id: randomUUID(),
+          path: normalized,
+          kind: CODEX_WORKTREE_FILE_KIND,
+          createdAt: now,
+          evidence: {
+            ...evidence,
+            changedFiles: [normalized],
+            // Per-file entries keep identity only; full diff lives on the evidence bundle.
+            diff: undefined,
+            verificationResults: evidence.verificationResults
+          }
+        });
+        this.appendTimeline(run, "artifact", `Worktree 修改：${normalized}`, now);
+      }
+    } else {
+      this.appendTimeline(run, "agent_status", "Codex Worktree 无实际修改；未登记虚假成果 Artifact。", now);
+    }
+
+    run.updatedAt = now;
+    await this.persist();
+    return run;
+  }
+
+  private async markWorktreeArtifactsDiscardedUnsafe(runId: string): Promise<Run> {
+    const run = await this.get(runId);
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const artifact of run.artifacts) {
+      if (artifact.evidence?.source !== "codex-worktree" || artifact.evidence.worktreeRunId !== runId) continue;
+      artifact.evidence = {
+        ...artifact.evidence,
+        discarded: true,
+        sessionStatus: "discarded",
+        consistency: "ok",
+        consistencyNote: "隔离 Worktree 已放弃；历史 Diff 与证据保留。",
+        summary: artifact.evidence.changeStatus === "no_modification"
+          ? "隔离 Worktree 已放弃（原本无修改）。"
+          : `${artifact.evidence.summary}（已放弃）`
+      };
+      changed = true;
+    }
+    if (changed) {
+      this.appendTimeline(run, "artifact", "隔离 Worktree 已放弃；相关 Artifact 保留历史并标记为已丢弃。", now);
+      run.updatedAt = now;
+      await this.persist();
+    }
+    return run;
+  }
+
+  private async reconcileWorktreeArtifactConsistencyUnsafe(
+    runId: string,
+    input: { sessionStatus: "active" | "discarded" | "missing"; consistency: "ok" | "missing_worktree" | "stale"; consistencyNote?: string }
+  ): Promise<Run> {
+    const run = await this.get(runId);
+    const now = new Date().toISOString();
+    let changed = false;
+    for (const artifact of run.artifacts) {
+      if (artifact.evidence?.source !== "codex-worktree" || artifact.evidence.worktreeRunId !== runId) continue;
+      const nextNote = input.consistencyNote ?? artifact.evidence.consistencyNote;
+      if (
+        artifact.evidence.sessionStatus === input.sessionStatus
+        && artifact.evidence.consistency === input.consistency
+        && artifact.evidence.consistencyNote === nextNote
+      ) {
+        continue;
+      }
+      artifact.evidence = {
+        ...artifact.evidence,
+        sessionStatus: input.sessionStatus,
+        consistency: input.consistency,
+        consistencyNote: nextNote,
+        discarded: input.sessionStatus === "discarded" ? true : artifact.evidence.discarded
+      };
+      changed = true;
+    }
+    if (changed) {
+      if (input.consistency === "missing_worktree") {
+        this.appendTimeline(
+          run,
+          "agent_status",
+          input.consistencyNote ?? "Worktree 已缺失；Artifact 索引标记为失效，请恢复隔离区或重新执行。",
+          now
+        );
+      }
+      run.updatedAt = now;
+      await this.persist();
+    }
+    return run;
+  }
+
+  /**
+   * AI Firstmate/Secondmate when configured; deterministic template only as fallback.
+   * Never mutates formal files; approval gates remain enforced by existing Run APIs.
+   */
+  private async applyPlanningPipeline(
+    run: Run,
+    subject: { title: string; description?: string },
+    now: string,
+    options: {
+      taskType?: TaskType;
+      requiredCapabilities?: string[];
+      verificationCommands?: string[][];
+      revisionNote?: string;
+    } = {}
+  ): Promise<void> {
+    run.status = "planning";
+    if (this.aiPlanning) {
+      const project = this.resolveProject ? await this.resolveProject(run.todoId) : undefined;
+      const outcome = await this.aiPlanning.plan({
+        runId: run.id,
+        todo: subject,
+        messages: run.messages,
+        project,
+        revisionNote: options.revisionNote,
+        overrides: {
+          taskType: options.taskType,
+          requiredCapabilities: options.requiredCapabilities
+        }
+      });
+
+      if (outcome.status === "awaiting_approval") {
+        run.planning = {
+          assessment: toTaskAssessment(outcome.assessment),
+          approvalStatus: "awaiting_approval",
+          verificationCommands: options.verificationCommands
+            ?? outcome.plan.verificationCommands
+            ?? defaultVerificationCommands(outcome.assessment.taskType)
+        };
+        this.appendFirstmateAssessment(run, now);
+        this.pushPlanVersion(run, outcome.plan, now, options.revisionNote);
+        run.status = "awaiting_plan_approval";
+        return;
+      }
+
+      if (outcome.status === "awaiting_input") {
+        run.planning = {
+          assessment: toTaskAssessment(outcome.assessment),
+          approvalStatus: "awaiting_input",
+          verificationCommands: options.verificationCommands
+            ?? defaultVerificationCommands(outcome.assessment.taskType)
+        };
+        this.appendFirstmateAssessment(run, now);
+        this.raiseCriticalInputAsk(run, outcome.assessment.criticalInputs, now);
+        return;
+      }
+
+      // Model failure / insufficient evidence: pause clearly — do not fabricate a template plan.
+      if (outcome.assessment) {
+        run.planning = {
+          assessment: toTaskAssessment(outcome.assessment),
+          approvalStatus: "awaiting_input",
+          verificationCommands: options.verificationCommands
+            ?? defaultVerificationCommands(outcome.assessment.taskType)
+        };
+        this.appendFirstmateAssessment(run, now);
+      }
+      run.status = "paused";
+      this.appendTimeline(run, "agent_status", `规划已暂停：${outcome.reason}`, now);
+      if (outcome.evidenceGaps?.length) {
+        this.appendTimeline(run, "agent_status", `证据缺口：${outcome.evidenceGaps.join("；")}`, now);
+      }
+      return;
+    }
+
+    // Template fallback when API roles / AiPlanningService are not available.
+    this.applyTemplatePlanning(run, subject, now, options);
+  }
+
+  private applyTemplatePlanning(
+    run: Run,
+    subject: { title: string; description?: string },
+    now: string,
+    options: {
+      taskType?: TaskType;
+      requiredCapabilities?: string[];
+      verificationCommands?: string[][];
+      revisionNote?: string;
+    }
+  ): void {
+    const assessment = assessTask(
+      {
+        ...subject,
+        instructions: run.messages.map((message) => message.content).join("\n")
+      },
+      { taskType: options.taskType, requiredCapabilities: options.requiredCapabilities }
+    );
+    run.planning = {
+      assessment,
+      approvalStatus: assessment.criticalInputs.length > 0 ? "awaiting_input" : "awaiting_approval",
+      verificationCommands: options.verificationCommands ?? defaultVerificationCommands(assessment.taskType)
     };
     this.appendFirstmateAssessment(run, now);
     if (assessment.criticalInputs.length > 0) {
-      run.status = "planning";
+      this.raiseCriticalInputAsk(run, assessment.criticalInputs, now);
       return;
     }
     run.status = "awaiting_plan_approval";
-    this.appendGeneratedPlan(run, now);
+    this.pushPlanVersion(run, generateSecondmatePlan(assessment, options.revisionNote), now, options.revisionNote);
+  }
+
+  private raiseCriticalInputAsk(run: Run, criticalInputs: string[], now: string): void {
+    const card = criticalInputsToAskUser(criticalInputs);
+    const previousStatus = run.status === "waiting_for_user"
+      ? (run.waitingForUserResume?.previousStatus ?? "planning")
+      : (run.status === "planning" ? "planning" : run.status);
+    const { requests, created, mergedInto } = enqueueAskUser(run.askUserRequests ?? [], {
+      kind: "ask_user",
+      prompt: card.prompt,
+      reason: card.reason,
+      recommendedAnswer: card.recommendedAnswer,
+      recommendationRationale: card.recommendationRationale,
+      inputMode: "free_text",
+      required: true,
+      source: { agent: "firstmate", stepKey: "planning.critical_input", label: "Firstmate 关键输入" }
+    }, now);
+    run.askUserRequests = requests;
+    if (mergedInto) {
+      this.appendTimeline(run, "ask_user", `Firstmate 合并关键输入问题（恢复位置：${mergedInto.source.stepKey}）`, now);
+    } else {
+      this.appendTimeline(
+        run,
+        "ask_user",
+        `ask_user 来自 firstmate：${created.prompt}（原因：${created.reason}；恢复位置：${created.source.stepKey}）`,
+        now
+      );
+    }
+    if (!run.waitingForUserResume) {
+      run.waitingForUserResume = { previousStatus, since: now };
+    }
+    run.status = "waiting_for_user";
+    this.appendTimeline(run, "agent_status", "Run 进入 waiting_for_user；在用户回答前不会继续消耗模型或执行后续步骤。", now);
+  }
+
+  private supersedeAsksForStep(run: Run, stepKey: string, now: string, summary: string): void {
+    if (!run.askUserRequests?.length) return;
+    let changed = false;
+    run.askUserRequests = run.askUserRequests.map((entry) => {
+      if ((entry.status === "pending" || entry.status === "queued") && entry.source.stepKey === stepKey) {
+        changed = true;
+        return { ...entry, status: "superseded" as const };
+      }
+      return entry;
+    });
+    if (changed) {
+      this.appendTimeline(run, "ask_user", summary, now);
+    }
+    if (!hasPendingAskUser(run.askUserRequests)) {
+      run.waitingForUserResume = undefined;
+    }
   }
 
   private appendFirstmateAssessment(run: Run, now: string): void {
@@ -1730,18 +2258,91 @@ export class RunService {
     }
   }
 
-  private appendGeneratedPlan(run: Run, now: string, revisionNote?: string): void {
+  /** Generate Secondmate plan (AI preferred) and append a version with optional diff. */
+  private async appendGeneratedPlan(run: Run, now: string, revisionNote?: string): Promise<void> {
     if (!run.planning) throw new Error("Firstmate assessment is required before generating a plan.");
-    const generated = generateSecondmatePlan(run.planning.assessment, revisionNote);
+
+    if (this.aiPlanning) {
+      const todo = await this.todos.get(run.todoId);
+      const project = this.resolveProject ? await this.resolveProject(run.todoId) : undefined;
+      const outcome = await this.aiPlanning.plan({
+        runId: run.id,
+        todo: { title: todo.title, description: todo.description },
+        messages: run.messages,
+        project,
+        revisionNote,
+        overrides: {
+          taskType: run.planning.assessment.taskType,
+          requiredCapabilities: run.planning.assessment.requiredCapabilities
+        }
+      });
+      if (outcome.status === "awaiting_approval") {
+        run.planning.assessment = toTaskAssessment(outcome.assessment);
+        run.planning.verificationCommands = outcome.plan.verificationCommands
+          ?? run.planning.verificationCommands
+          ?? defaultVerificationCommands(outcome.assessment.taskType);
+        this.pushPlanVersion(run, outcome.plan, now, revisionNote);
+        return;
+      }
+      if (outcome.status === "awaiting_input") {
+        run.planning.assessment = toTaskAssessment(outcome.assessment);
+        run.planning.approvalStatus = "awaiting_input";
+        this.raiseCriticalInputAsk(run, outcome.assessment.criticalInputs, now);
+        return;
+      }
+      run.status = "paused";
+      this.appendTimeline(run, "agent_status", `计划修订暂停：${outcome.reason}`, now);
+      return;
+    }
+
+    this.pushPlanVersion(
+      run,
+      generateSecondmatePlan(run.planning.assessment, revisionNote),
+      now,
+      revisionNote
+    );
+  }
+
+  private pushPlanVersion(
+    run: Run,
+    generated: GeneratedPlan | AiGeneratedPlan,
+    now: string,
+    revisionNote?: string
+  ): void {
+    if (!run.planning) throw new Error("Firstmate assessment is required before generating a plan.");
+    const previous = run.planVersions.at(-1);
     const version = Math.max(0, ...run.planVersions.map((plan) => plan.version)) + 1;
     const plan: PlanVersionIndex = {
       version,
       createdAt: now,
-      ...generated,
-      verificationCommands: run.planning.verificationCommands ?? defaultVerificationCommands(run.planning.assessment.taskType)
+      summary: generated.summary,
+      complexity: generated.complexity,
+      steps: generated.steps,
+      acceptanceCriteria: generated.acceptanceCriteria,
+      risks: generated.risks,
+      prohibitions: generated.prohibitions,
+      generatedBy: "secondmate",
+      revisionNote: revisionNote?.trim() || generated.revisionNote,
+      verificationCommands: run.planning.verificationCommands
+        ?? generated.verificationCommands
+        ?? defaultVerificationCommands(run.planning.assessment.taskType),
+      dependencies: generated.dependencies,
+      expectedArtifacts: generated.expectedArtifacts,
+      allowedScope: generated.allowedScope,
+      verificationMethods: generated.verificationMethods
     };
+    if (previous) {
+      plan.diffFromPrevious = computePlanVersionDiff(previous, plan);
+      this.appendTimeline(
+        run,
+        "plan_version",
+        `Secondmate 计划 v${plan.version}：${plan.summary}（相对 v${previous.version} 变更字段 ${plan.diffFromPrevious.changedFieldCount} 项）`,
+        now
+      );
+    } else {
+      this.appendTimeline(run, "plan_version", `Secondmate 计划 v${plan.version}：${plan.summary}`, now);
+    }
     run.planVersions.push(plan);
-    this.appendTimeline(run, "plan_version", `Secondmate 计划 v${plan.version}：${plan.summary}`, now);
   }
 
   private assertApprovedPlan(run: Run, operation: string): void {
@@ -1967,6 +2568,36 @@ export class RunService {
       release?.();
     }
   }
+}
+
+function toTaskAssessment(assessment: AiTaskAssessment | TaskAssessment): TaskAssessment {
+  return {
+    taskType: assessment.taskType,
+    requiredCapabilities: assessment.requiredCapabilities,
+    criticalInputs: assessment.criticalInputs,
+    assumptions: assessment.assumptions,
+    complexity: assessment.complexity,
+    rationale: "rationale" in assessment ? assessment.rationale : undefined,
+    evidenceGaps: "evidenceGaps" in assessment ? assessment.evidenceGaps : undefined,
+    insufficientEvidence: "insufficientEvidence" in assessment ? assessment.insufficientEvidence : undefined,
+    contextUsage: "contextUsage" in assessment ? assessment.contextUsage : undefined
+  };
+}
+
+function formatAskAnswerSummary(request: AskUserRequest): string {
+  const answer = request.answer;
+  if (!answer) return "(空)";
+  const parts: string[] = [];
+  if (answer.selectedOptionIds?.length) {
+    const labels = (request.options ?? [])
+      .filter((option) => answer.selectedOptionIds!.includes(option.id))
+      .map((option) => option.label);
+    parts.push(`选项=${labels.join("、") || answer.selectedOptionIds.join(",")}`);
+  }
+  if (answer.freeText) parts.push(`文本=${answer.freeText}`);
+  if (answer.replanFeedback) parts.push(`修订反馈=${answer.replanFeedback}`);
+  if (answer.approved !== undefined) parts.push(answer.approved ? "批准" : "拒绝");
+  return parts.join("；") || "(空)";
 }
 
 function normalizeCapabilities(values: string[]): string[] {

@@ -1,3 +1,10 @@
+/**
+ * Planning data model + deterministic fallback helpers used by RunService today.
+ * Real AI Firstmate / Secondmate planning lives in AiPlanningService (task 18).
+ */
+
+import { defaultVerificationCommandsForTaskType } from "../verification/proposeVerification.js";
+
 export const taskTypes = ["implementation", "bug_fix", "research", "writing", "analysis", "automation", "other"] as const;
 
 export type TaskType = (typeof taskTypes)[number];
@@ -9,6 +16,18 @@ export interface TaskAssessment {
   criticalInputs: string[];
   assumptions: string[];
   complexity: PlanComplexity;
+  /** AI Firstmate extensions (optional for template path). */
+  rationale?: string;
+  evidenceGaps?: string[];
+  insufficientEvidence?: boolean;
+  contextUsage?: {
+    projectFacts?: string[];
+    files?: string[];
+    assumptions?: string[];
+    workspaceSummary?: string;
+    instructionSources?: string[];
+    omittedBecauseUnnecessary?: string[];
+  };
 }
 
 export interface GeneratedPlan {
@@ -21,6 +40,11 @@ export interface GeneratedPlan {
   generatedBy: "secondmate";
   revisionNote?: string;
   verificationCommands: string[][];
+  /** AI / structured plan extensions (optional for legacy template plans). */
+  dependencies?: string[];
+  expectedArtifacts?: string[];
+  allowedScope?: string[];
+  verificationMethods?: string[];
 }
 
 export interface PlanningSubject {
@@ -34,6 +58,10 @@ export interface PlanningOverrides {
   requiredCapabilities?: string[];
 }
 
+/**
+ * Deterministic Firstmate fallback (keyword classification).
+ * Prefer AiPlanningService.plan() when ModelRuntime + Roles are available.
+ */
 export function assessTask(subject: PlanningSubject, overrides: PlanningOverrides = {}): TaskAssessment {
   const context = [subject.title, subject.description, subject.instructions].filter(Boolean).join("\n").trim();
   const taskType = overrides.taskType ?? inferTaskType(context);
@@ -51,30 +79,59 @@ export function assessTask(subject: PlanningSubject, overrides: PlanningOverride
   };
 }
 
+/**
+ * Deterministic Secondmate fallback (type-aware templates).
+ * Prefer AiPlanningService.plan() for task-specific AI plans with distinct shapes.
+ */
 export function generateSecondmatePlan(assessment: TaskAssessment, revisionNote?: string): GeneratedPlan {
-  const steps = stepsFor(assessment.taskType, assessment.complexity);
+  const baseSteps = stepsFor(assessment.taskType, assessment.complexity);
+  const note = revisionNote?.trim() || "";
+  // Template fallback must still produce a substantial revision when user feedback is present.
+  const steps = note
+    ? [
+        baseSteps[0] ?? "确认任务边界与反馈",
+        `根据用户反馈调整：${note}`,
+        ...baseSteps.slice(1),
+        "复核反馈中的验收与禁止项是否已落实"
+      ]
+    : baseSteps;
   const label = taskTypeLabels[assessment.taskType];
   const risk = risksFor(assessment.taskType, assessment.complexity);
+  const acceptance = note
+    ? [...acceptanceFor(assessment.taskType), `已响应用户反馈：${note.slice(0, 120)}`]
+    : acceptanceFor(assessment.taskType);
   return {
-    summary: `Secondmate ${label}计划（${complexityLabels[assessment.complexity]}复杂度，${steps.length} 步）`,
+    summary: note
+      ? `Secondmate ${label}修订计划（反馈：${note.slice(0, 80)}）`
+      : `Secondmate ${label}计划（${complexityLabels[assessment.complexity]}复杂度，${steps.length} 步）`,
     complexity: assessment.complexity,
     steps,
-    acceptanceCriteria: acceptanceFor(assessment.taskType),
-    risks: risk,
+    acceptanceCriteria: acceptance,
+    risks: note ? [...risk, "修订后需重新确认范围与副作用"] : risk,
     prohibitions: [
       "不得在计划获批前创建、修改或登记正式成果文件。",
       "不得在计划获批前执行删除、安装、外发或其他危险操作。",
-      "Firstmate 仅负责识别、编排和确认，不得直接生成正式 Artifact。"
+      "Firstmate 仅负责识别、编排和确认，不得直接生成正式 Artifact。",
+      ...(note ? [`修订时必须落实用户反馈：${note.slice(0, 100)}`] : [])
     ],
     generatedBy: "secondmate",
-    revisionNote: revisionNote?.trim() || undefined,
-    verificationCommands: defaultVerificationCommands(assessment.taskType)
+    revisionNote: note || undefined,
+    verificationCommands: defaultVerificationCommands(assessment.taskType),
+    dependencies: dependenciesFor(assessment.taskType),
+    expectedArtifacts: artifactsFor(assessment.taskType),
+    allowedScope: allowedScopeFor(assessment.taskType),
+    verificationMethods: verificationMethodsFor(assessment.taskType)
   };
 }
 
+/**
+ * Task-type-only fallback when no project workspace facts are available.
+ * Project-aware commands come from `verification/proposeVerification` (Ticket 25)
+ * and must be based on stack evidence, user input, or an explicit hypothesis —
+ * never a blind npm test/typecheck/build triple.
+ */
 export function defaultVerificationCommands(taskType: TaskType): string[][] {
-  if (taskType !== "implementation" && taskType !== "bug_fix" && taskType !== "automation") return [];
-  return [["npm", "test"], ["npm", "run", "typecheck"], ["npm", "run", "build"]];
+  return defaultVerificationCommandsForTaskType(taskType);
 }
 
 function inferTaskType(context: string): TaskType {
@@ -104,7 +161,7 @@ function assumptionsFor(taskType: TaskType, context: string): string[] {
   const assumptions = ["仅在获准的 Project 工作区范围内工作。"];
   if (!/(test|测试|验收|verify|验证)/i.test(context)) assumptions.push("未指定验证命令时，将按项目现有约定选择最小必要验证。");
   if (!/(deadline|时间|日期|预算)/i.test(context)) assumptions.push("未提供时间或预算限制，将优先完成可验证的最小范围。");
-  if (taskType === "research" || taskType === "analysis") assumptions.push("未授权对外发送；结论仅作为 Run 内计划与结果摘要。" );
+  if (taskType === "research" || taskType === "analysis") assumptions.push("未授权对外发送；结论仅作为 Run 内计划与结果摘要。");
   return assumptions;
 }
 
@@ -151,6 +208,54 @@ function risksFor(taskType: TaskType, complexity: PlanComplexity): string[] {
   return risks;
 }
 
+function dependenciesFor(taskType: TaskType): string[] {
+  switch (taskType) {
+    case "implementation": return ["已批准的功能范围", "可运行的本地工作区"];
+    case "bug_fix": return ["可复现步骤或失败日志", "受影响模块的当前位置"];
+    case "research": return ["调研问题陈述", "可访问的本地资料范围"];
+    case "writing": return ["文档主题与受众", "需要引用的项目事实"];
+    case "analysis": return ["分析对象与成功标准"];
+    case "automation": return ["目标流程与允许的 shell 范围"];
+    default: return ["已确认的任务边界"];
+  }
+}
+
+function artifactsFor(taskType: TaskType): string[] {
+  switch (taskType) {
+    case "implementation": return ["src/** 功能改动", "相关单元测试"];
+    case "bug_fix": return ["最小修复 diff", "回归测试或复现记录"];
+    case "research": return ["调研结论摘要", "证据引用列表"];
+    case "writing": return ["目标文档草稿"];
+    case "analysis": return ["分析备忘录"];
+    case "automation": return ["自动化脚本", "运行说明"];
+    default: return ["已批准范围内的产出"];
+  }
+}
+
+function allowedScopeFor(taskType: TaskType): string[] {
+  switch (taskType) {
+    case "implementation": return ["项目工作区内与目标功能直接相关的源码与测试"];
+    case "bug_fix": return ["复现路径上的最小相关文件"];
+    case "research": return ["只读查阅已授权工作区资料；不修改正式源码"];
+    case "writing": return ["文档目录与已确认的引用材料"];
+    case "analysis": return ["只读分析已授权路径"];
+    case "automation": return ["获准的脚本目录与工作区相对路径"];
+    default: return ["获准 Project 工作区中的最小必要路径"];
+  }
+}
+
+function verificationMethodsFor(taskType: TaskType): string[] {
+  switch (taskType) {
+    case "implementation": return ["运行针对性测试", "typecheck/build 如适用"];
+    case "bug_fix": return ["复现原失败场景确认已修复", "运行相关回归测试"];
+    case "research": return ["核对结论是否均可追溯到证据或假设"];
+    case "writing": return ["核对章节覆盖与事实一致性"];
+    case "analysis": return ["核对结论、约束与未决项是否完整"];
+    case "automation": return ["在获准范围内试运行并检查退出码/输出"];
+    default: return ["按验收标准做最小可验证检查"];
+  }
+}
+
 function normalizeList(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
@@ -166,3 +271,6 @@ const taskTypeLabels: Record<TaskType, string> = {
 };
 
 const complexityLabels: Record<PlanComplexity, string> = { low: "低", medium: "中", high: "高" };
+
+// AI Firstmate/Secondmate: import from ./aiPlanningService.js, ./planningContext.js, ./planningSchemas.js
+// (kept separate to avoid ESM circular imports with the deterministic fallback helpers above).
