@@ -108,6 +108,49 @@ describe("Run selection", () => {
     expect(fetch).toHaveBeenNthCalledWith(3, "http://127.0.0.1:41731/api/runs/run-1/checkpoint-resume", expect.objectContaining({ method: "POST" }));
   });
 
+  it("previews, applies, and keeps worktree pending through apply endpoints", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        runId: "run-1",
+        ok: true,
+        status: "ready",
+        commitMessageDraft: "应用 Run run-1 的隔离修改。",
+        changedFiles: ["a.ts"],
+        dirtyFiles: [],
+        conflictFiles: [],
+        externalChangeDetected: false,
+        applied: false,
+        pushed: false,
+        canCompleteDevRun: false
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        status: "applied",
+        runId: "run-1",
+        commitSha: "abc123",
+        pushed: false,
+        canCompleteDevRun: true,
+        sessionStatus: "applied"
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        runId: "run-1",
+        status: "keep_pending",
+        sessionStatus: "active",
+        canCompleteDevRun: false,
+        pushed: false,
+        applyRecord: { decision: "keep_pending", pushed: false }
+      }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const client = createRunClient("http://127.0.0.1:41731");
+
+    await client.previewWorktreeApply("run-1");
+    await client.applyWorktree("run-1", { commitMessage: "应用 Run run-1 的隔离修改。" });
+    await client.keepWorktreePending("run-1");
+
+    expect(fetch).toHaveBeenNthCalledWith(1, "http://127.0.0.1:41731/api/runs/run-1/worktree/apply/preview", expect.any(Object));
+    expect(fetch).toHaveBeenNthCalledWith(2, "http://127.0.0.1:41731/api/runs/run-1/worktree/apply", expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenNthCalledWith(3, "http://127.0.0.1:41731/api/runs/run-1/worktree/keep-pending", expect.objectContaining({ method: "POST" }));
+  });
+
   it("surfaces structured 409 conflict and 403 dangerous re-approval checkpoint resume bodies", async () => {
     const conflictRun = {
       id: "run-1",

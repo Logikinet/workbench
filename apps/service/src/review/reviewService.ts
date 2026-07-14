@@ -1,11 +1,14 @@
 import type { Todo, TodoService } from "../todos/todoService.js";
-import type {
-  PlanVersionIndex,
-  ReviewFinding,
-  ReviewIndex,
-  ReviewSeverity,
-  Run,
-  RunService
+import {
+  CODEX_WORKTREE_EVIDENCE_KIND,
+  CODEX_WORKTREE_FILE_KIND,
+  type PlanVersionIndex,
+  type ReviewFinding,
+  type ReviewIndex,
+  type ReviewSeverity,
+  type Run,
+  type RunService,
+  type WorktreeArtifactEvidence
 } from "../runs/runService.js";
 
 /** Independent Reviewer input: never includes write credentials or mutation APIs. */
@@ -233,7 +236,10 @@ export function assembleReviewContext(run: Run, todo: Todo): ReviewContext {
     outcomes: {
       executionStatus: run.execution.status,
       completedSteps: [...run.execution.completedSteps],
-      artifacts: run.artifacts.map((artifact) => ({ path: artifact.path, kind: artifact.kind })),
+      // Product artifacts only — exclude the evidence bundle so no_modification cannot fake outcomes.
+      artifacts: run.artifacts
+        .filter((artifact) => artifact.kind !== CODEX_WORKTREE_EVIDENCE_KIND)
+        .map((artifact) => ({ path: artifact.path, kind: artifact.kind })),
       logMessages: run.logs.map((log) => log.message),
       timelineSummaries: run.timeline.map((event) => event.summary)
     },
@@ -347,23 +353,62 @@ function evaluateCriterion(criterion: string, context: ReviewContext): ReviewFin
   };
 }
 
-/** Require structured verification evidence — not a bare agent claim containing the word "test". */
+/**
+ * Prefer normalized Codex Worktree verification (`passed` / exitCode) over fragile log keywords like "passed".
+ * Falls back to structured text forms only when no Worktree evidence is present.
+ */
 function hasCredibleVerificationEvidence(context: ReviewContext): boolean {
+  const worktree = extractWorktreeEvidenceFromContext(context);
+  if (worktree) {
+    if (worktree.discarded) {
+      // Discarded worktree keeps history but is not live proof of current product verification.
+      return false;
+    }
+    if (worktree.changeStatus === "no_modification") {
+      // Explicit no-modification is not a verification pass for product criteria.
+      return worktree.verificationResults.length > 0 && worktree.verificationResults.every((row) => row.passed);
+    }
+    const commands = context.approvedPlan?.verificationCommands ?? [];
+    if (commands.length > 0) {
+      return commands.every((command) => {
+        const match = worktree.verificationResults.find((row) => sameCommand(row.command, command));
+        return Boolean(match && match.passed && match.exitCode === 0);
+      });
+    }
+    return worktree.verificationResults.length > 0 && worktree.verificationResults.every((row) => row.passed && row.exitCode === 0);
+  }
+
   const blob = [...context.outcomes.logMessages, ...context.outcomes.timelineSummaries, ...context.evidence].join("\n");
   const commands = context.approvedPlan?.verificationCommands ?? [];
 
   if (commands.length > 0) {
     return commands.every((command) => {
       const joined = command.join(" ");
-      // Command must appear with a success signal (exitCode 0 / 通过 / passed).
+      // Command must appear with a structured exitCode signal — not a bare "passed" keyword.
       const commandSeen = blob.includes(joined) || command.every((part) => blob.includes(part));
-      const successSeen = /exitCode\s*[:=]\s*0|exit code 0|验证结果.*通过|checks?\s+passed|\bpassed\b|成功/i.test(blob);
+      const successSeen = /exitCode\s*[:=]\s*0|exit code 0|验证结果.*exitCode/i.test(blob);
       return commandSeen && successSeen;
     });
   }
 
-  // No planned commands: still require structured result language, not "验证：npm test 通过" alone without exit/result form.
-  return /验证结果\s*[：:].*(exitCode\s*[:=]\s*0|通过)|verification result|exitCode\s*[:=]\s*0/i.test(blob);
+  // No planned commands: require structured exitCode form, not "验证：npm test 通过" alone.
+  return /验证结果\s*[：:].*exitCode\s*[:=]\s*0|verification result.*exitCode\s*[:=]\s*0|exitCode\s*[:=]\s*0/i.test(blob);
+}
+
+function extractWorktreeEvidenceFromContext(context: ReviewContext): WorktreeArtifactEvidence | undefined {
+  for (const line of context.evidence) {
+    if (!line.startsWith("worktree-evidence-json:")) continue;
+    try {
+      return JSON.parse(line.slice("worktree-evidence-json:".length)) as WorktreeArtifactEvidence;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function sameCommand(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((part, index) => part === right[index]);
 }
 
 function detectProhibitionViolation(context: ReviewContext): string | undefined {
@@ -389,7 +434,29 @@ function collectEvidence(run: Run, approved?: PlanVersionIndex): string[] {
     for (const command of approved.verificationCommands ?? []) evidence.push(`计划验证命令：${command.join(" ")}`);
   }
   for (const step of run.execution.completedSteps) evidence.push(`完成步骤：${step}`);
-  for (const artifact of run.artifacts) evidence.push(`成果：${artifact.kind} ${artifact.path}`);
+  for (const artifact of run.artifacts) {
+    evidence.push(`成果：${artifact.kind} ${artifact.path}`);
+    if (artifact.kind === CODEX_WORKTREE_EVIDENCE_KIND && artifact.evidence?.source === "codex-worktree") {
+      const wt = artifact.evidence;
+      evidence.push(`Worktree 标识：${wt.worktreeRunId}；状态 ${wt.sessionStatus}${wt.discarded ? "（已丢弃）" : ""}`);
+      evidence.push(`变更状态：${wt.changeStatus === "no_modification" ? "无修改" : `已修改 ${wt.changedFiles.length} 个文件`}`);
+      if (wt.changedFiles.length > 0) evidence.push(`修改文件：${wt.changedFiles.join("、")}`);
+      if (wt.diff) evidence.push(`完整 Diff 已登记（${wt.diff.length} 字符）`);
+      for (const row of wt.verificationResults) {
+        evidence.push(
+          `结构化验证：${row.command.join(" ")} exitCode=${row.exitCode ?? "null"} passed=${row.passed}`
+        );
+      }
+      if (wt.consistency === "missing_worktree") {
+        evidence.push(`一致性：Worktree 缺失 — ${wt.consistencyNote ?? "请恢复或重新执行"}`);
+      }
+      // Machine-readable payload for hasCredibleVerificationEvidence (not keyword scraping).
+      evidence.push(`worktree-evidence-json:${JSON.stringify(wt)}`);
+    }
+    if (artifact.kind === CODEX_WORKTREE_FILE_KIND) {
+      evidence.push(`Worktree 文件成果：${artifact.path}${artifact.evidence?.discarded ? "（已丢弃）" : ""}`);
+    }
+  }
   for (const log of run.logs.slice(-20)) evidence.push(`日志：${log.message}`);
   for (const event of run.timeline.filter((item) => item.kind === "review" || item.kind === "artifact" || item.kind === "log").slice(-20)) {
     evidence.push(`时间线：${event.kind} ${event.summary}`);

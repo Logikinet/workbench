@@ -1,6 +1,5 @@
 import { spawn as launchProcess, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import type { GitWorktreeService } from "../git/gitWorktreeService.js";
 import type { ProjectService } from "../projects/projectService.js";
 import type { AgentRole, RoleService } from "../roles/roleService.js";
 import {
@@ -11,6 +10,26 @@ import {
 } from "../runs/runService.js";
 import type { TodoService } from "../todos/todoService.js";
 import { leaseRequestFromRun, type RunQueueService } from "../queue/runQueueService.js";
+import type { RuntimeAdapter } from "../runtime/adapter.js";
+import {
+  CodexCliAdapter,
+  createCodexCliPortFromRunner,
+  normalizeCodexCliFailure,
+  type CodexCliHarnessPort
+} from "../runtime/codexCliAdapter.js";
+import {
+  createComplete,
+  createFail,
+  createInterrupt,
+  EventSequencer
+} from "../runtime/events.js";
+import { runtimeEventToLog } from "../runtime/orchestration.js";
+import type { RuntimeEvent } from "../runtime/types.js";
+import {
+  indexCodexWorktreeArtifacts,
+  type CodexArtifactOutcome,
+  type CodexWorktreeDependency
+} from "./codexArtifactIndex.js";
 
 export interface CodexCommandResult {
   exitCode: number | null;
@@ -59,8 +78,17 @@ export interface CodexCliServiceOptions {
   runs: RunService;
   roles: RoleService;
   runtime?: CodexCliRuntime;
-  worktrees?: Pick<GitWorktreeService, "isGitWorkspace" | "prepare" | "discard">; // prepare returns created=true only for this attempt
+  /** prepare returns created=true only for this attempt; get/captureDiff index artifacts after completion. */
+  worktrees?: CodexWorktreeDependency;
   queue?: RunQueueService;
+  /**
+   * Optional unified Runtime Adapter (codex-cli harness).
+   * When omitted, a CodexCliAdapter is built over the process runtime port so
+   * probe / terminal events share the unified RuntimeEvent surface.
+   */
+  runtimeAdapter?: RuntimeAdapter;
+  /** Optional injected Codex harness port (defaults to createCodexCliPortFromRunner). */
+  harnessPort?: CodexCliHarnessPort;
 }
 
 interface ActiveCodexExecution {
@@ -70,6 +98,8 @@ interface ActiveCodexExecution {
   terminating: boolean;
   termination?: Promise<void>;
   diagnosticTail: string[];
+  /** Per-run sequence allocator for unified Runtime events. */
+  sequencer: EventSequencer;
 }
 
 interface ExecutionContext {
@@ -92,59 +122,27 @@ export class CodexCliService {
   private readonly completions = new Map<string, Promise<void>>();
   private readonly completionOrder: string[] = [];
   private readonly runtime: CodexCliRuntime;
+  private readonly harnessPort: CodexCliHarnessPort;
+  private readonly runtimeAdapter: RuntimeAdapter;
 
   constructor(private readonly options: CodexCliServiceOptions) {
     this.runtime = options.runtime ?? new NodeCodexCliRuntime();
+    this.harnessPort = options.harnessPort ?? createCodexCliPortFromRunner({
+      run: (args) => this.runtime.run(args),
+      buildTurnArgs: (input) => this.commandArguments(input.workspacePath ?? process.cwd(), input.prompt)
+    });
+    this.runtimeAdapter = options.runtimeAdapter ?? new CodexCliAdapter({ port: this.harnessPort });
     this.options.runs.onExecutionInterrupted((runId) => this.abort(runId));
   }
 
+  /** Probe via the unified Codex Runtime Adapter port (same taxonomy as contract suite). */
   async status(): Promise<CodexCliStatus> {
-    let versionCheck: CodexCommandResult;
-    try {
-      versionCheck = await this.runtime.run(["--version"]);
-    } catch {
-      return {
-        installed: false,
-        authenticated: false,
-        reason: "无法检测 Codex CLI。请检查本机安装和登录状态后重试。"
-      };
-    }
-    if (versionCheck.errorCode === "ENOENT") {
-      return {
-        installed: false,
-        authenticated: false,
-        reason: "Codex CLI 未安装。请安装 Codex CLI 后重新执行此 Run。"
-      };
-    }
-    if (versionCheck.exitCode !== 0) {
-      return {
-        installed: true,
-        authenticated: false,
-        reason: "Codex CLI 无法正常启动。请检查本机安装后重试。"
-      };
-    }
+    return this.harnessPort.status();
+  }
 
-    const version = firstLine(versionCheck.stdout) || undefined;
-    let loginCheck: CodexCommandResult;
-    try {
-      loginCheck = await this.runtime.run(["login", "status"]);
-    } catch {
-      return {
-        installed: true,
-        authenticated: false,
-        version,
-        reason: "无法验证 Codex CLI 登录状态。请在本机运行 codex login 后重试。"
-      };
-    }
-    if (loginCheck.exitCode !== 0) {
-      return {
-        installed: true,
-        authenticated: false,
-        version,
-        reason: "Codex CLI 尚未登录或登录已失效。请在本机运行 codex login 后重试。"
-      };
-    }
-    return { installed: true, authenticated: true, version };
+  /** Expose the Runtime Adapter for orchestration that wants unified stream events. */
+  getRuntimeAdapter(): RuntimeAdapter {
+    return this.runtimeAdapter;
   }
 
   async start(runId: string, input: StartCodexCliInput = {}): Promise<Run> {
@@ -198,7 +196,8 @@ export class CodexCliService {
     const active: ActiveCodexExecution = {
       outputTail: Promise.resolve(),
       terminating: false,
-      diagnosticTail: []
+      diagnosticTail: [],
+      sequencer: new EventSequencer()
     };
     this.active.set(runId, active);
     this.forgetCompletion(runId);
@@ -514,7 +513,17 @@ export class CodexCliService {
   ): Promise<void> {
     await active.outputTail;
     const run = await this.options.runs.get(runId);
-    if (active.terminating || run.status !== "running" || run.execution.status !== "running") return;
+    const interrupted = active.terminating || run.status !== "running" || run.execution.status !== "running";
+    if (interrupted) {
+      await this.emitRuntimeEvent(
+        runId,
+        active,
+        createInterrupt(runId, active.sequencer.next(), active.terminating ? "用户停止了 Codex CLI 会话。" : "Codex CLI 会话已中断。")
+      );
+      // Still refresh Worktree → Artifact index after stop/pause so Reviewer keeps Diff history.
+      await this.indexArtifactsAfterCodex(runId, active.terminating ? "interrupted" : "paused");
+      return;
+    }
     if (!result.error && result.exitCode === 0) {
       try {
         const todo = await this.options.todos.get(run.todoId);
@@ -527,11 +536,71 @@ export class CodexCliService {
       } catch {
         /* coarse checkpoint is best-effort; completion must still advance */
       }
+      await this.emitRuntimeEvent(
+        runId,
+        active,
+        createComplete(runId, active.sequencer.next(), "Codex CLI turn completed.")
+      );
+      // Index Diff/evidence while execution is still authorized, then finish for review.
+      await this.indexArtifactsAfterCodex(runId, "success");
       await this.options.runs.finishProfessionalExecution(runId, "Codex CLI 已完成执行，等待审查。");
       return;
     }
     const message = await this.completionFailureMessage(result, active.diagnosticTail);
+    const normalized = normalizeCodexCliFailure(
+      [result.error instanceof Error ? result.error.message : "", ...active.diagnosticTail, message].filter(Boolean).join("\n"),
+      result.exitCode
+    );
+    await this.emitRuntimeEvent(
+      runId,
+      active,
+      createFail(runId, active.sequencer.next(), {
+        ...normalized,
+        // Keep the existing user-facing Chinese guidance as the fail message.
+        message
+      })
+    );
+    await this.indexArtifactsAfterCodex(runId, "failure");
     await this.pauseAfterFailure(runId, message);
+  }
+
+  /** Persist a unified RuntimeEvent onto the Run timeline (secret-free). */
+  private async emitRuntimeEvent(
+    runId: string,
+    active: ActiveCodexExecution,
+    event: RuntimeEvent
+  ): Promise<void> {
+    const line = runtimeEventToLog(event);
+    if (!line) return;
+    active.outputTail = active.outputTail
+      .then(async () => {
+        await this.options.runs.recordLog(runId, line);
+      })
+      .catch(() => undefined);
+    await active.outputTail;
+  }
+
+  /**
+   * Captures Worktree changed files + full Diff + verification and registers normalized Run evidence.
+   * Best-effort: indexing failures must not block Codex terminal state transitions.
+   */
+  private async indexArtifactsAfterCodex(runId: string, outcome: CodexArtifactOutcome): Promise<void> {
+    const worktrees = this.options.worktrees;
+    if (!worktrees?.get || !worktrees.captureDiff) return;
+    try {
+      const run = await this.options.runs.get(runId);
+      const plan = run.planVersions.find((entry) => entry.version === run.planning?.approvedPlanVersion);
+      await indexCodexWorktreeArtifacts({
+        runId,
+        outcome,
+        worktrees,
+        runs: this.options.runs,
+        autoVerify: outcome === "success",
+        verificationCommands: plan?.verificationCommands
+      });
+    } catch {
+      /* indexing is best-effort; terminal Run transition remains authoritative */
+    }
   }
 
   private forwardOutput(
@@ -600,11 +669,16 @@ export class CodexCliService {
     diagnostics: string[]
   ): Promise<string> {
     const errorText = [result.error instanceof Error ? result.error.message : "", ...diagnostics].join("\n");
-    if (/login|auth|credential|unauthori[sz]ed/i.test(errorText)) {
+    // Classify through the shared Codex Runtime error normalizer, then map to stable Chinese guidance.
+    const normalized = normalizeCodexCliFailure(errorText || "Codex CLI process failed.", result.exitCode);
+    if (normalized.kind === "not_logged_in") {
+      if (/ENOENT|not found|not recognized|未安装|不可用/i.test(errorText)) {
+        return "Codex CLI 不可用。请确认已安装后重试。";
+      }
       return "Codex CLI 登录已失效。请在本机运行 codex login 后重试。";
     }
-    if (/ENOENT|not found|not recognized/i.test(errorText)) {
-      return "Codex CLI 不可用。请确认已安装后重试。";
+    if (normalized.kind === "timeout") {
+      return "Codex CLI 调用超时。请检查本机状态后重试。";
     }
     const readiness = await this.status();
     if (!readiness.installed || !readiness.authenticated) {
@@ -616,7 +690,10 @@ export class CodexCliService {
 
   private runtimeFailureMessage(error: unknown): string {
     const text = error instanceof Error ? error.message : "";
-    if (/ENOENT|not found|not recognized/i.test(text)) return "Codex CLI 未安装或不可用。请安装后重试。";
+    const normalized = normalizeCodexCliFailure(text || "Codex CLI failed to start.");
+    if (normalized.kind === "not_logged_in" || /ENOENT|not found|not recognized/i.test(text)) {
+      return "Codex CLI 未安装或不可用。请安装后重试。";
+    }
     return "Codex CLI 无法启动。请检查本机登录和安装状态后重试。";
   }
 

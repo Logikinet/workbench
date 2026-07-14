@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises";
 import { isAbsolute, join, normalize, sep } from "node:path";
 import type { ConnectionService } from "../connections/connectionService.js";
+import { ModelRuntime } from "../model/modelRuntime.js";
 import { AgentWorkspace } from "../projects/agentWorkspace.js";
 import type { ProjectService } from "../projects/projectService.js";
 import type { AgentRole, RoleService } from "../roles/roleService.js";
@@ -14,6 +15,21 @@ import {
 } from "../runs/runService.js";
 import type { TodoService } from "../todos/todoService.js";
 import { leaseRequestFromRun, type RunQueueService } from "../queue/runQueueService.js";
+import { ApiAgentAdapter } from "../runtime/apiAgentAdapter.js";
+import {
+  drainRuntimeSend,
+  preferRuntimeAdapter,
+  runtimeEventToLog
+} from "../runtime/orchestration.js";
+import type { RuntimeAdapter } from "../runtime/adapter.js";
+import { createControlledTools } from "./controlledTools.js";
+import {
+  DEFAULT_TOOL_LOOP_LIMITS,
+  runToolLoop,
+  type ToolLoopEvent,
+  type ToolLoopLimits,
+  type ToolLoopResult
+} from "./toolLoop.js";
 
 export interface ProfessionalAgentServiceOptions {
   projects: ProjectService;
@@ -22,6 +38,19 @@ export interface ProfessionalAgentServiceOptions {
   roles: RoleService;
   connections: ConnectionService;
   queue?: RunQueueService;
+  /**
+   * Optional unified Runtime Adapter (API harness).
+   * When set (or auto-created for role-based turns), model turns stream RuntimeEvents
+   * instead of calling ConnectionService.chatCompletion directly.
+   */
+  runtimeAdapter?: RuntimeAdapter;
+  /**
+   * When true (default), construct an ApiAgentAdapter from roles/connections if none is injected.
+   * Set false to force the legacy chatCompletion path (tests / rollback).
+   */
+  preferRuntimeAdapter?: boolean;
+  /** Optional multi-turn tool-loop budget overrides (tests / host config). */
+  toolLoopLimits?: Partial<ToolLoopLimits>;
 }
 
 export interface TemporaryProfessionalAgentInput {
@@ -71,9 +100,24 @@ const maxFileBytes = 1024 * 1024;
 /** Runs one API-backed Professional Agent through the approved local file boundary. */
 export class ProfessionalAgentService {
   private readonly active = new Map<string, ActiveExecution>();
+  private readonly runtimeAdapter: RuntimeAdapter | undefined;
 
   constructor(private readonly options: ProfessionalAgentServiceOptions) {
     this.options.runs.onExecutionInterrupted((runId) => this.abort(runId));
+    this.runtimeAdapter = this.resolveRuntimeAdapter(options);
+  }
+
+  private resolveRuntimeAdapter(options: ProfessionalAgentServiceOptions): RuntimeAdapter | undefined {
+    const injected = preferRuntimeAdapter(options.runtimeAdapter);
+    if (injected) return injected;
+    if (options.preferRuntimeAdapter === false) return undefined;
+    // Production default: orchestration prefers the unified Runtime Adapter for role-based turns.
+    return new ApiAgentAdapter({
+      modelRuntime: new ModelRuntime({
+        roles: options.roles,
+        connections: options.connections
+      })
+    });
   }
 
   async start(runId: string, input: StartProfessionalAgentInput): Promise<Run> {
@@ -231,119 +275,375 @@ export class ProfessionalAgentService {
     await this.options.runs.recordLog(runId, {
       level: "info",
       message: recoveryNote
-        ? `正在重建模型会话并调用 Professional Agent：${selection.name}。${recoveryNote}`
-        : `正在调用 Professional Agent：${selection.name}。`
+        ? `正在重建模型会话并调用 Professional Agent：${selection.name}（多轮工具循环）。${recoveryNote}`
+        : `正在调用 Professional Agent：${selection.name}（多轮工具循环）。`
     });
     if (signal.aborted) return;
     const connectionId = selection.connectionId;
     if (!connectionId) throw new Error("The selected API-backed Professional Agent needs a model connection.");
-    const response = await this.options.connections.chatCompletion(connectionId, {
-      modelId: selection.modelId,
-      signal,
-      messages: [
-        { role: "system", content: selection.systemInstruction },
-        {
-          role: "user",
-          content: JSON.stringify({
-            task: todo.title,
-            description: todo.description,
-            workspace: "approved-project-workspace",
-            plan: {
-              steps: latestPlan.steps,
-              acceptanceCriteria: latestPlan.acceptanceCriteria,
-              risks: latestPlan.risks,
-              prohibitions: latestPlan.prohibitions
-            },
-            checkpoint: {
-              completedSteps: [...completedSteps],
-              interruptedStep,
-              recoveryMode: "reconstruct_and_replay",
-              note: recoveryNote ?? "Original model internal session is not restored."
-            },
-            corrections: run.messages.map((message) => message.content),
-            outputContract: {
-              summary: "short non-secret summary",
-              actions: [{ type: "write_file", path: "relative/path.ext", content: "file content" }]
-            },
-            constraints: [
-              "Return JSON only.",
-              "Only request write_file actions with relative paths.",
-              "Do not request shell commands, network requests, deletion, or external sending.",
-              "Do not repeat completedSteps; only continue from interruptedStep or remaining work."
-            ]
-          })
+
+    const approvedCommands = resolveApprovedCommands(run, latestPlan);
+    const pendingOverwriteApprovals = new Map<string, true>();
+    const tools = createControlledTools({
+      workspacePath: project.workspacePath,
+      authorizedTools: selection.tools,
+      permissions: selection.permissions ?? {
+        workspace: "project_only",
+        network: false,
+        shell: false,
+        externalSend: false
+      },
+      approvedCommands,
+      authorizedSkills: selection.skills ?? ["implement"],
+      onDangerousWrite: async ({ path, kind }) => {
+        if (kind !== "overwrite_file") return undefined;
+        const recovery = (await this.options.runs.get(runId)).checkpointRecovery;
+        if (recovery?.dangerousReplayApproved === true) return undefined;
+        if (pendingOverwriteApprovals.has(path)) return undefined;
+        pendingOverwriteApprovals.set(path, true);
+        return {
+          ok: false,
+          summary: `Overwrite requires user confirmation: ${path}`,
+          needsApproval: {
+            kind: "delete_file",
+            summary: `Professional Agent 请求覆盖已有文件，必须由用户确认：overwrite_file:${path}`
+          }
+        };
+      }
+    });
+
+    const taskPayload = JSON.stringify({
+      task: todo.title,
+      description: todo.description,
+      workspace: "approved-project-workspace",
+      plan: {
+        steps: latestPlan.steps,
+        acceptanceCriteria: latestPlan.acceptanceCriteria,
+        risks: latestPlan.risks,
+        prohibitions: latestPlan.prohibitions,
+        verificationCommands: approvedCommands
+      },
+      checkpoint: {
+        completedSteps: [...completedSteps],
+        interruptedStep,
+        recoveryMode: "reconstruct_and_replay",
+        note: recoveryNote ?? "Original model internal session is not restored."
+      },
+      corrections: run.messages.map((message) => message.content),
+      outputContract: {
+        multiTurn: [
+          { type: "tool_call", tool: "list_files|read_file|search_files|write_file|apply_patch|run_command", arguments: {} },
+          { type: "final", summary: "short non-secret summary", actions: [{ type: "write_file", path: "relative/path.ext", content: "file content" }] },
+          { type: "ask_user", prompt: "...", reason: "..." },
+          { type: "ask_approval", kind: "...", summary: "..." },
+          { type: "ask_replan", prompt: "...", reason: "..." }
+        ],
+        legacySingleShot: {
+          summary: "short non-secret summary",
+          actions: [{ type: "write_file", path: "relative/path.ext", content: "file content" }]
         }
+      },
+      constraints: [
+        "Return JSON only for each turn.",
+        "Use controlled tools; paths must be relative to the approved Project workspace.",
+        "Shell/test/build commands must match plan verificationCommands exactly (argv).",
+        "Do not request network, external send, or unapproved installs.",
+        "Do not repeat completedSteps; only continue from interruptedStep or remaining work.",
+        "Each turn receives only necessary context and prior tool result summaries — never dump the whole repo."
       ]
     });
-    const output = parseAgentOutput(response);
-    await this.options.runs.recordLog(runId, { level: "info", message: `模型输出摘要：${summarize(output.summary)}` });
-    const workspace = new AgentWorkspace(this.options.projects, project.id, runId, this.options.runs);
 
-    for (let index = 0; index < output.actions.length; index += 1) {
-      const action = output.actions[index]!;
-      if (signal.aborted) throw new Error("Professional Agent request was interrupted.");
-      const approval = gateAction(selection, action, project.workspacePath);
-      if (approval) {
-        await this.options.runs.requestExecutionApproval(runId, approval);
-        return;
+    const checkpointSummary = recoveryNote
+      ? `completedSteps=${[...completedSteps].join(",") || "none"}; interruptedStep=${interruptedStep ?? "none"}; ${recoveryNote}`
+      : completedSteps.size > 0 || interruptedStep
+        ? `completedSteps=${[...completedSteps].join(",") || "none"}; interruptedStep=${interruptedStep ?? "none"}`
+        : undefined;
+
+    const priorToolSummaries = run.logs
+      .filter((entry) => /工具活动：|tool_result|工具结果/.test(entry.message))
+      .slice(-12)
+      .map((entry) => entry.message);
+
+    const limits = { ...DEFAULT_TOOL_LOOP_LIMITS, ...this.options.toolLoopLimits };
+    const loopResult = await runToolLoop(
+      {
+        runId,
+        workspacePath: project.workspacePath,
+        tools,
+        limits,
+        signal,
+        invokeModel: async (messages, turnSignal) => {
+          // Compact multi-turn: host sends only the latest user-facing payload built from
+          // system+history. Prefer a single user blob so Runtime Adapter path stays simple.
+          const userPayload = messages
+            .filter((message) => message.role !== "system")
+            .map((message) => `${message.role}: ${message.content}`)
+            .join("\n\n");
+          const systemFromMessages = messages.find((message) => message.role === "system")?.content;
+          const content = await this.invokeModelTurn({
+            runId,
+            selection,
+            signal: turnSignal,
+            userPayload: userPayload || taskPayload,
+            checkpointSummary,
+            systemOverride: systemFromMessages
+          });
+          return { content };
+        },
+        onEvent: async (event) => {
+          await this.recordToolLoopEvent(runId, event);
+        }
+      },
+      {
+        systemInstruction: selection.systemInstruction,
+        taskPayload,
+        priorToolSummaries: priorToolSummaries.length > 0 ? priorToolSummaries : undefined
       }
-      if (action.type !== "write_file" || !action.path || action.content === undefined) {
-        await this.options.runs.requestExecutionApproval(runId, {
-          kind: "unsupported_operation",
-          summary: `Professional Agent 请求了当前执行器不支持的操作：${describeAction(action)}。`
-        });
-        return;
+    );
+
+    await this.applyToolLoopResult(runId, selection, project.workspacePath, project.id, completedSteps, interruptedStep, loopResult, signal);
+  }
+
+  private async recordToolLoopEvent(runId: string, event: ToolLoopEvent): Promise<void> {
+    try {
+      switch (event.kind) {
+        case "turn_start":
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `工具循环：第 ${event.turn} 轮模型调用`
+          });
+          break;
+        case "model_response":
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `模型输出摘要：${summarize(event.contentSummary)}`
+          });
+          break;
+        case "tool_request":
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `工具请求：${event.toolName} (${event.toolCallId})`
+          });
+          break;
+        case "tool_result":
+          await this.options.runs.recordLog(runId, {
+            level: event.ok ? "info" : "warn",
+            message: `工具结果：${event.toolName} ${event.ok ? "ok" : "failed"} — ${summarize(event.summary)}`
+          });
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `工具活动：${event.toolName} ${summarize(event.summary).slice(0, 120)}`
+          });
+          break;
+        case "artifact":
+          await this.options.runs.recordArtifact(runId, {
+            path: event.path,
+            kind: event.artifactKind
+          }).catch(() => undefined);
+          break;
+        case "limit":
+          await this.options.runs.recordLog(runId, {
+            level: "warn",
+            message: `工具循环上限：${event.limit} — ${event.message}`
+          });
+          break;
+        case "paused":
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `工具循环暂停（${event.reason}）：${summarize(event.detail)}`
+          });
+          break;
+        default:
+          break;
       }
-      const targetPath = resolveProjectPath(project.workspacePath, action.path);
-      const alreadyExists = await fileExists(targetPath);
-      const actionKind = alreadyExists ? "overwrite_file" as const : "write_file" as const;
-      const step = `${actionKind}:${action.path}`;
-      const aliases = [`write_file:${action.path}`, `overwrite_file:${action.path}`];
-      if (aliases.some((key) => completedSteps.has(key))) {
-        await this.options.runs.recordLog(runId, {
-          level: "info",
-          message: `跳过已完成检查点步骤：write_file:${action.path}`
-        });
-        continue;
+    } catch {
+      // Observability must not break the loop.
+    }
+  }
+
+  private async applyToolLoopResult(
+    runId: string,
+    selection: ProfessionalAgentSelection,
+    workspacePath: string,
+    projectId: string,
+    completedSteps: Set<string>,
+    interruptedStep: string | undefined,
+    loopResult: ToolLoopResult,
+    signal: AbortSignal
+  ): Promise<void> {
+    // Register any remaining artifacts that onEvent may have missed under race conditions.
+    for (const artifact of loopResult.artifacts) {
+      try {
+        await this.options.runs.recordArtifact(runId, { path: artifact.path, kind: artifact.kind });
+      } catch {
+        // ignore duplicate / auth edge cases mid-pause
       }
-      const recovery = (await this.options.runs.get(runId)).checkpointRecovery;
-      const matchesInterrupted = Boolean(
-        interruptedStep
-        && (interruptedStep === step || aliases.includes(interruptedStep))
-      );
-      // Dangerous ops (including overwrite) never auto-replay without explicit re-approval — even when replaying the interrupted step.
-      if (actionKind === "overwrite_file" || isDangerousStepKey(step) || (matchesInterrupted && interruptedStep && isDangerousStepKey(interruptedStep))) {
-        if (recovery?.dangerousReplayApproved !== true) {
+    }
+
+    if (loopResult.status === "interrupted") {
+      throw new Error(loopResult.error ?? "Professional Agent request was interrupted.");
+    }
+
+    if (loopResult.status === "failed" || loopResult.status === "failed_limit") {
+      throw new Error(loopResult.error ?? loopResult.summary);
+    }
+
+    if (loopResult.status === "paused_approval" && loopResult.approval) {
+      const kind = mapApprovalKind(loopResult.approval.kind);
+      await this.options.runs.requestExecutionApproval(runId, {
+        kind,
+        summary: loopResult.approval.summary
+      });
+      return;
+    }
+
+    if (loopResult.status === "paused_ask_user" && loopResult.askUser) {
+      await this.options.runs.failProfessionalExecution(runId, summarize(loopResult.askUser.prompt));
+      await this.options.runs.requestAskUser(runId, {
+        kind: "ask_user",
+        prompt: loopResult.askUser.prompt,
+        reason: loopResult.askUser.reason,
+        inputMode: loopResult.askUser.options?.length ? "single_select" : "free_text",
+        options: loopResult.askUser.options,
+        required: true,
+        source: {
+          agent: "professional_agent",
+          stepKey: "tool_loop_ask_user",
+          roleId: selection.roleId,
+          label: selection.name
+        }
+      });
+      return;
+    }
+
+    if (loopResult.status === "paused_ask_replan" && loopResult.askUser) {
+      await this.options.runs.failProfessionalExecution(runId, summarize(loopResult.askUser.prompt));
+      await this.options.runs.requestAskUser(runId, {
+        kind: "ask_replan",
+        prompt: loopResult.askUser.prompt,
+        reason: loopResult.askUser.reason,
+        inputMode: "free_text",
+        required: true,
+        source: {
+          agent: "professional_agent",
+          stepKey: "tool_loop_ask_replan",
+          roleId: selection.roleId,
+          label: selection.name
+        }
+      });
+      return;
+    }
+
+    // completed — apply any legacy final actions that were not already written via tools
+    const summary = loopResult.finalSummary ?? loopResult.summary;
+    await this.options.runs.recordLog(runId, {
+      level: "info",
+      message: `模型输出摘要：${summarize(summary)}（工具轮次 ${loopResult.turns}，约 ${loopResult.totalTokens} tokens）`
+    });
+
+    const actions = (loopResult.finalActions ?? []).map((action) => normalizeFileAction(action));
+    if (actions.length > 0) {
+      const workspace = new AgentWorkspace(this.options.projects, projectId, runId, this.options.runs);
+      for (let index = 0; index < actions.length; index += 1) {
+        const action = actions[index]!;
+        if (signal.aborted) throw new Error("Professional Agent request was interrupted.");
+        const approval = gateAction(selection, action, workspacePath);
+        if (approval) {
+          await this.options.runs.requestExecutionApproval(runId, approval);
+          return;
+        }
+        if (action.type !== "write_file" || !action.path || action.content === undefined) {
           await this.options.runs.requestExecutionApproval(runId, {
-            kind: dangerousKindFromStepKey(step),
-            summary: actionKind === "overwrite_file"
-              ? `Professional Agent 请求覆盖已有文件，必须由用户确认：${step}`
-              : `中断的危险步骤不会自动重放，需用户确认：${step}`
+            kind: "unsupported_operation",
+            summary: `Professional Agent 请求了当前执行器不支持的操作：${describeAction(action)}。`
           });
           return;
         }
+        const targetPath = resolveProjectPath(workspacePath, action.path);
+        const alreadyExists = await fileExists(targetPath);
+        const actionKind = alreadyExists ? "overwrite_file" as const : "write_file" as const;
+        const step = `${actionKind}:${action.path}`;
+        const aliases = [`write_file:${action.path}`, `overwrite_file:${action.path}`];
+        if (aliases.some((key) => completedSteps.has(key))) {
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `跳过已完成检查点步骤：write_file:${action.path}`
+          });
+          continue;
+        }
+        // Skip if the multi-turn tool already wrote this path.
+        if (loopResult.artifacts.some((artifact) => artifact.path === action.path && artifact.kind === "file")) {
+          await this.options.runs.recordLog(runId, {
+            level: "info",
+            message: `跳过工具循环已写入的文件：${action.path}`
+          });
+          completedSteps.add(step);
+          completedSteps.add(`write_file:${action.path}`);
+          continue;
+        }
+        const recovery = (await this.options.runs.get(runId)).checkpointRecovery;
+        const matchesInterrupted = Boolean(
+          interruptedStep
+          && (interruptedStep === step || aliases.includes(interruptedStep))
+        );
+        if (actionKind === "overwrite_file" || isDangerousStepKey(step) || (matchesInterrupted && interruptedStep && isDangerousStepKey(interruptedStep))) {
+          if (recovery?.dangerousReplayApproved !== true) {
+            await this.options.runs.requestExecutionApproval(runId, {
+              kind: dangerousKindFromStepKey(step),
+              summary: actionKind === "overwrite_file"
+                ? `Professional Agent 请求覆盖已有文件，必须由用户确认：${step}`
+                : `中断的危险步骤不会自动重放，需用户确认：${step}`
+            });
+            return;
+          }
+        }
+        const nextAction = actions[index + 1];
+        const nextStep = nextAction ? stepKeyFor(nextAction) : undefined;
+        await this.options.runs.beginExecutionStep(runId, step);
+        await workspace.writeText(targetPath, action.content);
+        const fingerprint = await captureWorkspaceFingerprint(
+          workspacePath,
+          [...(await this.options.runs.get(runId)).artifacts.map((artifact) => artifact.path), action.path]
+        );
+        await this.options.runs.recordExecutionStep(runId, step, {
+          summary: `已写入 ${action.path}`,
+          nextStep,
+          workspaceFingerprint: fingerprint,
+          actionKind,
+          dangerous: actionKind === "overwrite_file"
+        });
+        await this.options.runs.recordArtifact(runId, { path: action.path, kind: "file" });
+        completedSteps.add(step);
+        completedSteps.add(`write_file:${action.path}`);
+        if (actionKind === "overwrite_file") completedSteps.add(`overwrite_file:${action.path}`);
       }
-      const nextAction = output.actions[index + 1];
-      const nextStep = nextAction ? stepKeyFor(nextAction) : undefined;
-      await this.options.runs.beginExecutionStep(runId, step);
-      await workspace.writeText(targetPath, action.content);
-      const fingerprint = await captureWorkspaceFingerprint(
-        project.workspacePath,
-        [...(await this.options.runs.get(runId)).artifacts.map((artifact) => artifact.path), action.path]
-      );
-      await this.options.runs.recordExecutionStep(runId, step, {
-        summary: `已写入 ${action.path}`,
-        nextStep,
-        workspaceFingerprint: fingerprint,
-        actionKind,
-        dangerous: actionKind === "overwrite_file"
-      });
-      await this.options.runs.recordArtifact(runId, { path: action.path, kind: "file" });
-      completedSteps.add(step);
-      completedSteps.add(`write_file:${action.path}`);
-      if (actionKind === "overwrite_file") completedSteps.add(`overwrite_file:${action.path}`);
+    } else if (loopResult.toolTrace.some((entry) => entry.toolName === "write_file" || entry.toolName === "apply_patch")) {
+      // Tools already produced files — record completed steps for checkpoint continuity.
+      for (const artifact of loopResult.artifacts.filter((entry) => entry.kind === "file")) {
+        const step = `write_file:${artifact.path}`;
+        if (completedSteps.has(step)) continue;
+        try {
+          await this.options.runs.beginExecutionStep(runId, step);
+          const fingerprint = await captureWorkspaceFingerprint(
+            workspacePath,
+            [...(await this.options.runs.get(runId)).artifacts.map((entry) => entry.path), artifact.path]
+          );
+          await this.options.runs.recordExecutionStep(runId, step, {
+            summary: `工具循环已写入 ${artifact.path}`,
+            workspaceFingerprint: fingerprint,
+            actionKind: "write_file",
+            dangerous: false
+          });
+          completedSteps.add(step);
+        } catch {
+          // Step recording is best-effort when artifacts already exist.
+        }
+      }
+    } else if ((loopResult.finalActions?.length ?? 0) === 0 && loopResult.toolTrace.length === 0) {
+      // Pure final with no actions and no tools — still valid completion if summary present.
     }
-    await this.options.runs.finishProfessionalExecution(runId, `Professional Agent 已完成：${summarize(output.summary)}`);
+
+    await this.options.runs.finishProfessionalExecution(runId, `Professional Agent 已完成：${summarize(summary)}`);
   }
 
   private async captureRunFingerprint(run: Run) {
@@ -351,6 +651,76 @@ export class ProfessionalAgentService {
     if (!todo.projectId) return undefined;
     const project = await this.options.projects.get(todo.projectId);
     return captureWorkspaceFingerprint(project.workspacePath, run.artifacts.map((artifact) => artifact.path));
+  }
+
+  /**
+   * Prefer unified Runtime Adapter stream events when available (role-based turns).
+   * Temporary agents without a Role stay on the legacy chatCompletion path.
+   */
+  private async invokeModelTurn(input: {
+    runId: string;
+    selection: ProfessionalAgentSelection;
+    signal: AbortSignal;
+    userPayload: string;
+    checkpointSummary?: string;
+    /** Optional multi-turn system text (tool catalog); falls back to Role instruction. */
+    systemOverride?: string;
+  }): Promise<string> {
+    const adapter = this.runtimeAdapter;
+    const roleId = input.selection.roleId;
+    const systemInstruction = input.systemOverride?.trim() || input.selection.systemInstruction;
+    if (adapter && roleId) {
+      // Fresh session id per model turn so multi-turn reconstruction stays checkpoint-friendly.
+      const sessionId = `${input.runId}:turn:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+      const session = await adapter.start({
+        roleId,
+        sessionId,
+        systemInstruction,
+        checkpointSummary: input.checkpointSummary
+      });
+      const onAbort = (): void => {
+        void adapter.cancel(session.sessionId).catch(() => undefined);
+      };
+      if (input.signal.aborted) onAbort();
+      else input.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        const drained = await drainRuntimeSend(adapter, session.sessionId, {
+          text: input.userPayload,
+          signal: input.signal
+        });
+        for (const event of drained.events) {
+          const line = runtimeEventToLog(event);
+          if (line) {
+            await this.options.runs.recordLog(input.runId, line).catch(() => undefined);
+          }
+        }
+        if (drained.terminal?.kind === "fail") {
+          throw new Error(drained.terminal.error.message);
+        }
+        if (drained.terminal?.kind === "interrupt") {
+          throw new Error(drained.terminal.reason || "Professional Agent request was interrupted.");
+        }
+        if (!drained.text.trim()) {
+          throw new Error("Professional Agent output must be valid JSON.");
+        }
+        return drained.text;
+      } finally {
+        input.signal.removeEventListener("abort", onAbort);
+        await adapter.dispose(session.sessionId).catch(() => undefined);
+      }
+    }
+
+    // Legacy path — temporary agents and explicit preferRuntimeAdapter: false.
+    const connectionId = input.selection.connectionId;
+    if (!connectionId) throw new Error("The selected API-backed Professional Agent needs a model connection.");
+    return this.options.connections.chatCompletion(connectionId, {
+      modelId: input.selection.modelId,
+      signal: input.signal,
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: input.userPayload }
+      ]
+    });
   }
 
   private abort(runId: string): void {
@@ -452,6 +822,58 @@ export class ProfessionalAgentService {
 
 function isCodeTask(taskType: TaskType | undefined): boolean {
   return taskType === "implementation" || taskType === "bug_fix" || taskType === "automation";
+}
+
+function resolveApprovedCommands(
+  run: Run,
+  latestPlan: { verificationCommands?: string[][] }
+): string[][] {
+  const fromPlanning = run.planning?.verificationCommands;
+  if (Array.isArray(fromPlanning) && fromPlanning.length > 0) return fromPlanning.map((entry) => [...entry]);
+  if (Array.isArray(latestPlan.verificationCommands) && latestPlan.verificationCommands.length > 0) {
+    return latestPlan.verificationCommands.map((entry) => [...entry]);
+  }
+  return [];
+}
+
+function mapApprovalKind(kind: string): ExecutionApprovalKind {
+  const normalized = kind.trim();
+  if (
+    normalized === "outside_workspace"
+    || normalized === "delete_file"
+    || normalized === "system_install"
+    || normalized === "external_send"
+    || normalized === "unapproved_skill"
+    || normalized === "unapproved_tool"
+    || normalized === "unsupported_operation"
+  ) {
+    return normalized;
+  }
+  return "unsupported_operation";
+}
+
+function normalizeFileAction(value: Record<string, unknown>): FileAction {
+  if (typeof value.type !== "string" || !value.type.trim()) {
+    throw new Error("Professional Agent action type is required.");
+  }
+  const parsed: FileAction = { type: value.type.trim() };
+  for (const field of ["path", "content", "command", "destination", "skill"] as const) {
+    if (value[field] !== undefined && typeof value[field] !== "string") {
+      throw new Error(`Professional Agent action ${field} must be text.`);
+    }
+    if (typeof value[field] === "string") {
+      parsed[field] = field === "content" ? value[field] : value[field].trim();
+    }
+  }
+  if (parsed.type === "write_file") {
+    if (!parsed.path || parsed.content === undefined) {
+      throw new Error("Professional Agent write_file actions need a path and content.");
+    }
+    if (Buffer.byteLength(parsed.content, "utf8") > maxFileBytes) {
+      throw new Error("Professional Agent file content is too large.");
+    }
+  }
+  return parsed;
 }
 
 function parseAgentOutput(value: string): AgentOutput {

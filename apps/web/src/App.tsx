@@ -9,6 +9,7 @@ import {
 import { ProjectsPanel } from "./components/ProjectsPanel.js";
 import { TodoBoard } from "./components/TodoBoard.js";
 import { ConnectionsPanel } from "./components/ConnectionsPanel.js";
+import { McpPanel } from "./components/McpPanel.js";
 import { RolesPanel } from "./components/RolesPanel.js";
 import { QueueGuardPanel } from "./components/QueueGuardPanel.js";
 import { BackupPanel } from "./components/BackupPanel.js";
@@ -68,6 +69,7 @@ export function App() {
       </section>
       <ProjectsPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
       <ConnectionsPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
+      <McpPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
       <RolesPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
       <QueueGuardPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
       <TodoBoard serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />

@@ -14,6 +14,13 @@ import { ResourceGuardService } from "./queue/resourceGuardService.js";
 import { RunQueueService } from "./queue/runQueueService.js";
 import { ModelRuntime } from "./model/modelRuntime.js";
 import { AiPlanningService } from "./planning/aiPlanningService.js";
+import { createVerificationService } from "./verification/verificationService.js";
+import { RoleRouterService } from "./routing/roleRouterService.js";
+import { SubtaskDagService } from "./subtasks/subtaskDagService.js";
+import { ToolRegistry } from "./tools/toolRegistry.js";
+import { SkillService } from "./skills/skillService.js";
+import { CapabilityRuntime } from "./skills/capabilityRuntime.js";
+import { McpService } from "./mcp/mcpService.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -106,6 +113,19 @@ async function main(): Promise<void> {
     });
   }
 
+  const verification = createVerificationService();
+  const roleRouter = new RoleRouterService({ roles, connections });
+  const subtasks = await SubtaskDagService.open(join(dataDirectory, "subtasks.json"), {
+    roleRouter
+  });
+  const tools = await ToolRegistry.open({ statePath: join(dataDirectory, "tools.json") });
+  const skills = await SkillService.open({ statePath: join(dataDirectory, "skills.json") });
+  const capabilityRuntime = new CapabilityRuntime({ skills, tools });
+  const mcp = await McpService.open({
+    statePath: join(dataDirectory, "mcp.json"),
+    vault: new WindowsCredentialVault()
+  });
+
   const webRoot = process.env.PAW_WEB_DIST?.trim() || undefined;
   const app = createApp({
     version: serviceVersion,
@@ -118,6 +138,13 @@ async function main(): Promise<void> {
     professionalAgents,
     codexCli,
     worktrees,
+    verification,
+    roleRouter,
+    subtasks,
+    tools,
+    skills,
+    capabilityRuntime,
+    mcp,
     reviews,
     backup,
     queue,

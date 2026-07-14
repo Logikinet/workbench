@@ -507,4 +507,266 @@ describe("API Professional Agent execution contract", () => {
     await runs.stop(first.id, "释放队列测试");
     await gated.waitForCompletion(first.id);
   });
+
+  it("runs a multi-turn tool loop: list/read/search then write, registering artifacts and tool activity", async () => {
+    const run = await approvedRun();
+    const role = await apiRole();
+    await writeFile(join(workspace, "notes.md"), "search-me target content\n", "utf8");
+    modelReplies.push(
+      JSON.stringify({ type: "tool_call", tool: "list_files", arguments: { path: "." } }),
+      JSON.stringify({ type: "tool_call", tool: "read_file", arguments: { path: "notes.md" } }),
+      JSON.stringify({ type: "tool_call", tool: "search_files", arguments: { query: "search-me" } }),
+      JSON.stringify({
+        type: "tool_call",
+        tool: "write_file",
+        arguments: { path: "analysis.md", content: "found notes\n" }
+      }),
+      JSON.stringify({ type: "final", summary: "多轮工具完成：已根据读取结果写入 analysis.md" })
+    );
+
+    await professionalAgents.start(run.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(run.id);
+
+    expect(await readFile(join(workspace, "analysis.md"), "utf8")).toBe("found notes\n");
+    const finished = await runs.get(run.id);
+    expect(finished).toMatchObject({ status: "awaiting_review", execution: { status: "succeeded" } });
+    expect(finished.artifacts.some((artifact) => artifact.path === "analysis.md")).toBe(true);
+    const logText = finished.logs.map((entry) => entry.message).join("\n");
+    expect(logText).toMatch(/工具循环：第 1 轮/);
+    expect(logText).toMatch(/工具请求：list_files|工具结果：list_files/);
+    expect(logText).toMatch(/工具请求：read_file|工具结果：read_file/);
+    expect(logText).toMatch(/工具请求：search_files|工具结果：search_files/);
+    expect(logText).toMatch(/工具活动：/);
+    expect(modelCallCount).toBeGreaterThanOrEqual(5);
+  });
+
+  it("runs plan-approved shell commands and blocks unapproved ones with AskApproval", async () => {
+    const connection = await connections.create({ baseUrl: "https://api.example.test/v1", apiKey: "local-key", modelId: "gpt-5" });
+    const role = await roles.create({
+      name: "Shell 验证专家",
+      responsibility: "运行计划内验证命令",
+      systemInstruction: "仅返回 JSON。",
+      connectionId: connection.id,
+      harness: "api",
+      reasoningEffort: "medium",
+      skills: ["implement"],
+      tools: ["filesystem", "shell"],
+      permissions: { workspace: "project_only", network: false, shell: true, externalSend: false },
+      allowFirstmateAutoInvoke: true
+    });
+    const run = await runs.create(todoId, "运行已批准验证命令。");
+    // Bind verification commands before approval so the plan stays approved for execution.
+    await runs.updatePlanning(run.id, {
+      verificationCommands: [["node", "-e", "console.log('verify-ok')"]]
+    });
+    await runs.decidePlan(run.id, { decision: "approved", summary: "批准验证。" });
+
+    modelReplies.push(
+      JSON.stringify({
+        type: "tool_call",
+        tool: "run_command",
+        arguments: { argv: ["node", "-e", "console.log('verify-ok')"] }
+      }),
+      JSON.stringify({ type: "final", summary: "验证命令已执行" })
+    );
+    await professionalAgents.start(run.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(run.id);
+    const ok = await runs.get(run.id);
+    expect(ok.execution.status).toBe("succeeded");
+    expect(ok.artifacts.some((artifact) => artifact.kind === "command_result")).toBe(true);
+    expect(ok.logs.map((entry) => entry.message).join("\n")).toMatch(/verify-ok|run_command|command_result|exit=/);
+
+    const blocked = await runs.create(todoId, "阻止未批准命令。");
+    await runs.updatePlanning(blocked.id, {
+      verificationCommands: [["node", "-e", "console.log('only-this')"]]
+    });
+    await runs.decidePlan(blocked.id, { decision: "approved", summary: "批准受限验证。" });
+    modelReplies.push(JSON.stringify({
+      type: "tool_call",
+      tool: "run_command",
+      arguments: { argv: ["node", "-e", "console.log('other')"] }
+    }));
+    await professionalAgents.start(blocked.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(blocked.id);
+    expect(await runs.get(blocked.id)).toMatchObject({
+      status: "paused",
+      execution: {
+        status: "failed",
+        retryable: true,
+        pendingApproval: { status: "awaiting_confirmation", kind: "unapproved_tool" }
+      }
+    });
+  });
+
+  it("raises AskUser and AskReplan from the tool loop without mutating the workspace", async () => {
+    const run = await approvedRun();
+    const role = await apiRole();
+    modelReplies.push(JSON.stringify({
+      type: "ask_user",
+      prompt: "请提供目标文件名",
+      reason: "任务描述缺少输出文件名"
+    }));
+    await professionalAgents.start(run.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(run.id);
+    const waiting = await runs.get(run.id);
+    expect(waiting.status).toBe("waiting_for_user");
+    expect(waiting.askUserRequests?.some((entry) => entry.kind === "ask_user" && entry.status === "pending")).toBe(true);
+    await expect(readFile(join(workspace, "result.md"), "utf8")).rejects.toThrow();
+
+    const replanRun = await approvedRun();
+    modelReplies.push(JSON.stringify({
+      type: "ask_replan",
+      prompt: "需要扩大验收范围",
+      reason: "当前计划无法覆盖请求"
+    }));
+    await professionalAgents.start(replanRun.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(replanRun.id);
+    const replanState = await runs.get(replanRun.id);
+    expect(replanState.status).toBe("waiting_for_user");
+    expect(replanState.askUserRequests?.some((entry) => entry.kind === "ask_replan")).toBe(true);
+  });
+
+  it("respects tool-loop turn limits and remains retryable after a limited failure", async () => {
+    const limited = new ProfessionalAgentService({
+      projects,
+      todos,
+      runs,
+      roles,
+      connections,
+      toolLoopLimits: { maxTurns: 2, maxTokens: 1_000_000, maxDurationMs: 60_000, maxOutputBytes: 8_000 }
+    });
+    const run = await approvedRun();
+    const role = await apiRole();
+    modelReplies.push(
+      JSON.stringify({ type: "tool_call", tool: "list_files", arguments: { path: "." } }),
+      JSON.stringify({ type: "tool_call", tool: "list_files", arguments: { path: "." } }),
+      JSON.stringify({ type: "tool_call", tool: "list_files", arguments: { path: "." } })
+    );
+    await limited.start(run.id, { roleId: role.id });
+    await limited.waitForCompletion(run.id);
+    const failed = await runs.get(run.id);
+    expect(failed.execution.status).toBe("failed");
+    expect(failed.execution.retryable).toBe(true);
+    expect(failed.execution.lastError).toMatch(/max turns|上限|turns/i);
+
+    modelReplies.push(JSON.stringify({
+      summary: "限制解除后完成。",
+      actions: [{ type: "write_file", path: "after-limit.md", content: "ok" }]
+    }));
+    // Use unlimited service for retry success path.
+    await professionalAgents.start(run.id, {});
+    await professionalAgents.waitForCompletion(run.id);
+    expect(await readFile(join(workspace, "after-limit.md"), "utf8")).toBe("ok");
+  });
+
+  it("supports stop during a multi-turn loop and checkpoint-aware retry after partial tool writes", async () => {
+    const role = await apiRole();
+    // Prefer legacy chatCompletion path so AbortSignal reaches the held mock fetch directly.
+    const legacy = new ProfessionalAgentService({
+      projects,
+      todos,
+      runs,
+      roles,
+      connections,
+      preferRuntimeAdapter: false
+    });
+
+    const run = await approvedRun();
+    holdModelRequest = true;
+    resetModelRequestSignal();
+    await legacy.start(run.id, { roleId: role.id });
+    await modelRequestStarted;
+    await runs.stop(run.id, "用户停止多轮工具循环");
+    await legacy.waitForCompletion(run.id);
+    expect(await runs.get(run.id)).toMatchObject({
+      status: "cancelled",
+      execution: { retryable: false }
+    });
+    holdModelRequest = false;
+
+    // Partial progress then approval pause, then retry.
+    const partial = await approvedRun();
+    modelReplies.push(
+      JSON.stringify({
+        type: "tool_call",
+        tool: "write_file",
+        arguments: { path: "partial.md", content: "step-1" }
+      }),
+      JSON.stringify({
+        type: "tool_call",
+        tool: "write_file",
+        arguments: { path: "../outside.md", content: "nope" }
+      })
+    );
+    await professionalAgents.start(partial.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(partial.id);
+    expect(await readFile(join(workspace, "partial.md"), "utf8")).toBe("step-1");
+    expect(await runs.get(partial.id)).toMatchObject({
+      status: "paused",
+      execution: {
+        status: "failed",
+        retryable: true,
+        pendingApproval: { kind: "outside_workspace" }
+      }
+    });
+    await runs.decideExecutionApproval(partial.id, { decision: "rejected", summary: "拒绝越界。" });
+    modelReplies.push(JSON.stringify({
+      summary: "重试完成。",
+      actions: [{ type: "write_file", path: "partial-done.md", content: "done" }]
+    }));
+    await professionalAgents.start(partial.id, {});
+    await professionalAgents.waitForCompletion(partial.id);
+    expect(await readFile(join(workspace, "partial-done.md"), "utf8")).toBe("done");
+    expect(await runs.get(partial.id)).toMatchObject({
+      status: "awaiting_review",
+      execution: { status: "succeeded" }
+    });
+  });
+
+  it("streams unified Runtime events for role-based turns and keeps temporary agents on the legacy path", async () => {
+    const role = await apiRole();
+    const run = await approvedRun();
+    modelReplies.push(JSON.stringify({
+      summary: "Runtime 路径完成。",
+      actions: [{ type: "write_file", path: "runtime-path.md", content: "via adapter" }]
+    }));
+    await professionalAgents.start(run.id, { roleId: role.id });
+    await professionalAgents.waitForCompletion(run.id);
+    const finished = await runs.get(run.id);
+    expect(await readFile(join(workspace, "runtime-path.md"), "utf8")).toBe("via adapter");
+    expect(finished).toMatchObject({ status: "awaiting_review", execution: { status: "succeeded" } });
+    const logText = finished.logs.map((entry) => entry.message).join("\n");
+    expect(logText).toMatch(/runtime:text_delta/);
+    expect(logText).toMatch(/runtime:complete/);
+    expect(modelCallCount).toBeGreaterThan(0);
+
+    // Legacy path remains available for temporary agents and explicit opt-out.
+    const legacy = new ProfessionalAgentService({
+      projects,
+      todos,
+      runs,
+      roles,
+      connections,
+      preferRuntimeAdapter: false
+    });
+    const connection = await connections.create({ baseUrl: "https://api.example.test/v1", apiKey: "legacy-key", modelId: "gpt-5" });
+    const temporaryRun = await approvedRun();
+    modelReplies.push(JSON.stringify({
+      summary: "临时完成。",
+      actions: [{ type: "write_file", path: "legacy-temp.md", content: "legacy" }]
+    }));
+    await legacy.start(temporaryRun.id, {
+      temporaryAgent: {
+        name: "临时 Runtime 兼容",
+        responsibility: "写文件",
+        systemInstruction: "返回 JSON。",
+        connectionId: connection.id,
+        tools: ["filesystem"]
+      }
+    });
+    await legacy.waitForCompletion(temporaryRun.id);
+    expect(await readFile(join(workspace, "legacy-temp.md"), "utf8")).toBe("legacy");
+    const legacyLogs = (await runs.get(temporaryRun.id)).logs.map((entry) => entry.message).join("\n");
+    expect(legacyLogs).not.toMatch(/runtime:text_delta/);
+  });
 });

@@ -26,6 +26,19 @@ import { mountProviderRoutes } from "../providers/providerRoutes.js";
 import { createPlanningRouter } from "../planning/planningRoutes.js";
 import type { AiPlanningService } from "../planning/aiPlanningService.js";
 import { createAskUserRouter } from "../askUser/askUserRoutes.js";
+import { registerVerificationRoutes } from "../verification/verificationRoutes.js";
+import type { VerificationService } from "../verification/verificationService.js";
+import { createRoutingRouter } from "../routing/routingRoutes.js";
+import type { RoleRouterService } from "../routing/roleRouterService.js";
+import { createSubtaskRouter } from "../subtasks/subtaskRoutes.js";
+import type { SubtaskDagService } from "../subtasks/subtaskDagService.js";
+import { createToolRouter } from "../tools/toolRoutes.js";
+import type { ToolRegistry } from "../tools/toolRegistry.js";
+import { createSkillRouter } from "../skills/skillRoutes.js";
+import type { SkillService } from "../skills/skillService.js";
+import type { CapabilityRuntime } from "../skills/capabilityRuntime.js";
+import { mountMcpRoutes } from "../mcp/mcpRoutes.js";
+import type { McpService } from "../mcp/mcpService.js";
 import type { ReviewService } from "../review/reviewService.js";
 import type { BackupService } from "../backup/backupService.js";
 import type { QueueConfigUpdate, RunQueueService } from "../queue/runQueueService.js";
@@ -53,6 +66,18 @@ export interface ServiceAppOptions {
   queue?: RunQueueService;
   /** Task 18: AI Firstmate/Secondmate planning (optional until ModelRuntime is wired). */
   aiPlanning?: AiPlanningService;
+  /** Task 25: project-aware verification. */
+  verification?: VerificationService;
+  /** Task 20: Firstmate role router. */
+  roleRouter?: RoleRouterService;
+  /** Task 21: Subtask DAG orchestration. */
+  subtasks?: SubtaskDagService;
+  /** Task 22: tools + skills capability runtime. */
+  tools?: ToolRegistry;
+  skills?: SkillService;
+  capabilityRuntime?: CapabilityRuntime;
+  /** Task 24: MCP connections. */
+  mcp?: McpService;
 }
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -120,7 +145,13 @@ export function createApp(options: ServiceAppOptions): Express {
         ...(options.connections ? (["connections", "providers"] as const) : []),
         ...(options.worktrees ? (["worktree-apply"] as const) : []),
         ...(options.aiPlanning ? (["ai-planning"] as const) : []),
-        ...(options.runs ? (["ask-user"] as const) : [])
+        ...(options.runs ? (["ask-user"] as const) : []),
+        ...(options.verification ? (["verification"] as const) : []),
+        ...(options.roleRouter ? (["role-router"] as const) : []),
+        ...(options.subtasks ? (["subtask-dag"] as const) : []),
+        ...(options.tools ? (["tools"] as const) : []),
+        ...(options.skills ? (["skills"] as const) : []),
+        ...(options.mcp ? (["mcp"] as const) : [])
       ]
     });
   });
@@ -146,6 +177,37 @@ export function createApp(options: ServiceAppOptions): Express {
   // Task 19: structured AskUser / AskApproval / AskReplan cards.
   if (options.runs) {
     app.use(createAskUserRouter(options.runs));
+  }
+
+  // Task 25: project-aware verification detect/propose/evidence.
+  registerVerificationRoutes(app, {
+    verification: options.verification,
+    runs: options.runs,
+    todos: options.todos,
+    projects: options.projects
+  });
+
+  // Task 20: Firstmate automatic role routing.
+  if (options.roleRouter) {
+    app.use(createRoutingRouter({ roleRouter: options.roleRouter }));
+  }
+
+  // Task 21: Subtask dependency graph + continuous Firstmate scheduling.
+  if (options.subtasks) {
+    app.use(createSubtaskRouter({ subtasks: options.subtasks }));
+  }
+
+  // Task 22: Tool Registry + Skills / capability resolve.
+  if (options.tools) {
+    app.use(createToolRouter({ tools: options.tools }));
+  }
+  if (options.skills) {
+    app.use(createSkillRouter({ skills: options.skills, capabilityRuntime: options.capabilityRuntime }));
+  }
+
+  // Task 24: MCP Server connections (secrets never returned).
+  if (options.mcp) {
+    mountMcpRoutes(app, options.mcp);
   }
 
   app.get("/api/queue/config", async (_request, response) => {

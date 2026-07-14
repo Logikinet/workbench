@@ -11,6 +11,7 @@ import { RoleService } from "../roles/roleService.js";
 import { RunService } from "../runs/runService.js";
 import { TodoService } from "../todos/todoService.js";
 import { CodexCliService, NodeCodexCliRuntime, type CodexCliProcess, type CodexCliRuntime, type CodexCommandResult } from "./codexCliService.js";
+import type { CodexWorktreeDependency } from "./codexArtifactIndex.js";
 
 class MemoryCredentialVault implements CredentialVault {
   async read(): Promise<string | undefined> { return undefined; }
@@ -24,6 +25,19 @@ class FakeCodexProcess extends EventEmitter implements CodexCliProcess {
   readonly kill = vi.fn((_signal?: NodeJS.Signals) => true);
   pid: number | undefined = 4200;
   signalCode: NodeJS.Signals | null = null;
+}
+
+/** Minimal worktree DI stubs so typecheck matches CodexWorktreeDependency (get + captureDiff for indexing). */
+function stubWorktrees(overrides: Record<string, unknown> = {}): CodexWorktreeDependency {
+  return {
+    isGitWorkspace: vi.fn().mockResolvedValue(true),
+    prepare: vi.fn(),
+    discard: vi.fn().mockResolvedValue({ status: "discarded" }),
+    get: vi.fn().mockRejectedValue(new Error("no worktree")),
+    captureDiff: vi.fn().mockResolvedValue({ changedFiles: [], diff: "" }),
+    runApprovedChecks: vi.fn().mockResolvedValue([]),
+    ...overrides
+  } as CodexWorktreeDependency;
 }
 
 class FakeCodexRuntime implements CodexCliRuntime {
@@ -92,8 +106,7 @@ describe("Codex CLI Harness contract", () => {
       runs,
       roles,
       runtime,
-      worktrees: {
-        isGitWorkspace: vi.fn().mockResolvedValue(true),
+      worktrees: stubWorktrees({
         prepare: vi.fn().mockImplementation(async (runId: string, mainWorkspacePath: string) => ({
           runId,
           mainWorkspacePath,
@@ -107,9 +120,8 @@ describe("Codex CLI Harness contract", () => {
           createdAt: "2026-01-01T00:00:00.000Z",
           updatedAt: "2026-01-01T00:00:00.000Z",
           verificationResults: []
-        })),
-        discard: vi.fn().mockResolvedValue({ status: "discarded" })
-      }
+        }))
+      })
     });
   });
 
@@ -210,8 +222,12 @@ describe("Codex CLI Harness contract", () => {
     await codex.waitForCompletion(run.id);
 
     expect(await runs.get(run.id)).toMatchObject({ status: "awaiting_review", execution: { status: "succeeded" } });
-    expect((await runs.get(run.id)).logs.map((entry) => entry.message).join("\n")).toContain("Codex CLI stderr: checking tests");
-    expect((await runs.get(run.id)).logs.map((entry) => entry.message).join("\n")).toContain("Codex CLI stdout:");
+    const logText = (await runs.get(run.id)).logs.map((entry) => entry.message).join("\n");
+    expect(logText).toContain("Codex CLI stderr: checking tests");
+    expect(logText).toContain("Codex CLI stdout:");
+    // Terminal outcome is also emitted as a unified Runtime event (Task 35 production wire).
+    expect(logText).toContain("runtime:complete");
+    expect(codex.getRuntimeAdapter().harness).toBe("codex-cli");
   });
 
   it("runs a Git Project in its prepared isolated Worktree without changing the main workspace target", async () => {
@@ -236,7 +252,7 @@ describe("Codex CLI Harness contract", () => {
       runs,
       roles,
       runtime,
-      worktrees: { isGitWorkspace, prepare, discard }
+      worktrees: stubWorktrees({ isGitWorkspace, prepare, discard })
     });
 
     await startApprovedWriteSession(run.id, role.id);
@@ -268,11 +284,11 @@ describe("Codex CLI Harness contract", () => {
       runs,
       roles,
       runtime,
-      worktrees: {
+      worktrees: stubWorktrees({
         isGitWorkspace: vi.fn().mockResolvedValue(false),
         prepare: vi.fn(),
         discard: vi.fn()
-      }
+      })
     });
 
     const paused = await codex.start(run.id, { roleId: role.id });
@@ -310,11 +326,11 @@ describe("Codex CLI Harness contract", () => {
       runs,
       roles,
       runtime,
-      worktrees: {
+      worktrees: stubWorktrees({
         isGitWorkspace: vi.fn().mockResolvedValue(true),
         prepare: vi.fn().mockImplementation(async () => { markPreparationStarted?.(); await preparation; return preparedSession; }),
         discard
-      }
+      })
     });
 
     await codex.start(run.id, { roleId: role.id });
@@ -357,11 +373,11 @@ describe("Codex CLI Harness contract", () => {
       runs,
       roles,
       runtime,
-      worktrees: {
+      worktrees: stubWorktrees({
         isGitWorkspace: vi.fn().mockResolvedValue(true),
         prepare: vi.fn().mockImplementation(async () => { markPreparationStarted?.(); await preparation; return existingSession; }),
         discard
-      }
+      })
     });
 
     await codex.start(run.id, { roleId: role.id });
@@ -569,6 +585,8 @@ describe("Codex CLI Harness contract", () => {
     const paused = await runs.get(run.id);
     expect(paused.status).toBe("paused");
     expect(paused.timeline.map((event) => event.summary).join("\n")).toContain("codex login");
+    // Fail is also emitted as a unified Runtime event with normalized taxonomy.
+    expect(paused.logs.map((entry) => entry.message).join("\n")).toMatch(/runtime:fail \[not_logged_in\]/);
   });
 
   it("rechecks local login status after an otherwise opaque non-zero Codex exit", async () => {
