@@ -18,6 +18,7 @@ const primarySections: WorkbenchSection[] = [
   "waiting",
   "todos",
   "projects",
+  "documents",
   "agents",
   "connections",
   "settings"

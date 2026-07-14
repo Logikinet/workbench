@@ -19,6 +19,7 @@ import { SessionPanel } from "./components/SessionPanel.js";
 import { WorkbenchNav } from "./components/WorkbenchNav.js";
 import { HomeDashboard } from "./components/HomeDashboard.js";
 import { WaitingOnMeCenter } from "./components/WaitingOnMeCenter.js";
+import { DocumentWorkflowPanel } from "./components/DocumentWorkflowPanel.js";
 import {
   formatWorkbenchHash,
   parseWorkbenchHash,
@@ -196,6 +197,10 @@ export function App() {
               <ConnectionsPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
               <McpPanel serviceUrl={serviceUrl} available={online} dataEpoch={dataEpoch} />
             </div>
+          )}
+
+          {route.section === "documents" && (
+            <DocumentWorkflowPanel serviceUrl={serviceUrl} available={online} />
           )}
 
           {route.section === "settings" && (

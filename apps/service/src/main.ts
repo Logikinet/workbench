@@ -44,6 +44,9 @@ import { DeterministicRoutingService } from "./routing/deterministicRoutingServi
 import { ConnectionModelProvider } from "./model/connectionProvider.js";
 import { RuntimeWatchdog } from "./watchdog/runtimeWatchdog.js";
 import { WatchdogService } from "./watchdog/watchdogService.js";
+import { OfficeCliRuntime } from "./officecli/officeCliRuntime.js";
+import { ZoteroConnector } from "./zotero/zoteroConnector.js";
+import { DocumentWorkflowService } from "./documentWorkflow/documentWorkflowService.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -299,6 +302,23 @@ async function main(): Promise<void> {
     vault: new WindowsCredentialVault()
   });
 
+  // Tasks 48–55: OfficeCLI + Zotero document workflow (report/thesis pipeline).
+  const officeCli = new OfficeCliRuntime({
+    logRoot: join(dataDirectory, "officecli-logs"),
+    onLog: async (entry) => {
+      // Structured local log only — never print secrets.
+      if (entry.level === "error") {
+        console.warn(`[OfficeCLI] ${entry.summary}`);
+      }
+    }
+  });
+  const zotero = new ZoteroConnector();
+  const documentWorkflow = await DocumentWorkflowService.open({
+    statePath: join(dataDirectory, "document-jobs.json"),
+    zotero,
+    office: officeCli
+  });
+
   // Self-reporting watchdog for status/update contract endpoints (Tray owns process recovery).
   const watchdogRuntime = new RuntimeWatchdog({
     controller: {
@@ -365,6 +385,9 @@ async function main(): Promise<void> {
     coursework,
     plugins,
     watchdog,
+    documentWorkflow,
+    zotero,
+    officeCli,
     reviews,
     backup,
     queue,

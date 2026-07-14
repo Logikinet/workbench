@@ -9,6 +9,7 @@ export const workbenchSections = [
   "projects",
   "agents",
   "connections",
+  "documents",
   "settings",
   "waiting"
 ] as const;
@@ -27,6 +28,7 @@ export const sectionLabels: Record<WorkbenchSection, string> = {
   projects: "Projects",
   agents: "Agents",
   connections: "Connections",
+  documents: "文档工作流",
   settings: "Settings",
   waiting: "等待我处理"
 };
@@ -47,6 +49,9 @@ export function parseWorkbenchHash(hash: string): WorkbenchRoute {
   if (head === "projects") return { section: "projects" };
   if (head === "agents") return { section: "agents" };
   if (head === "connections") return { section: "connections" };
+  if (head === "documents" || head === "document-workflow" || head === "papers") {
+    return { section: "documents" };
+  }
   if (head === "settings") return { section: "settings" };
   if ((workbenchSections as readonly string[]).includes(head)) {
     return { section: head as WorkbenchSection };

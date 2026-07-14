@@ -52,6 +52,7 @@ import { createDocumentRouter } from "../documents/documentRoutes.js";
 import { createCourseworkRouter } from "../coursework/courseworkRoutes.js";
 import { createPluginRouter } from "../plugins/pluginRoutes.js";
 import { createWatchdogRouter } from "../watchdog/watchdogRoutes.js";
+import { createDocumentWorkflowRouter } from "../documentWorkflow/documentWorkflowRoutes.js";
 import type { ReviewService } from "../review/reviewService.js";
 import type { BackupService } from "../backup/backupService.js";
 import type { QueueConfigUpdate, RunQueueService } from "../queue/runQueueService.js";
@@ -107,6 +108,10 @@ export interface ServiceAppOptions {
   documents?: import("../documents/documentService.js").DocumentService;
   coursework?: import("../coursework/courseworkService.js").CourseworkService;
   plugins?: import("../plugins/pluginService.js").PluginService;
+  /** Tasks 48–56: OfficeCLI + Zotero document workflow. */
+  documentWorkflow?: import("../documentWorkflow/documentWorkflowService.js").DocumentWorkflowService;
+  zotero?: import("../zotero/zoteroConnector.js").ZoteroConnector;
+  officeCli?: import("../officecli/officeCliRuntime.js").OfficeCliRuntime;
 }
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -191,7 +196,10 @@ export function createApp(options: ServiceAppOptions): Express {
         ...(options.research ? (["research"] as const) : []),
         ...(options.documents ? (["documents"] as const) : []),
         ...(options.coursework ? (["coursework"] as const) : []),
-        ...(options.plugins ? (["plugins"] as const) : [])
+        ...(options.plugins ? (["plugins"] as const) : []),
+        ...(options.documentWorkflow ? (["document-workflow"] as const) : []),
+        ...(options.zotero ? (["zotero"] as const) : []),
+        ...(options.officeCli ? (["officecli"] as const) : [])
       ]
     });
   });
@@ -292,6 +300,16 @@ export function createApp(options: ServiceAppOptions): Express {
   }
   if (options.watchdog) {
     app.use(createWatchdogRouter({ watchdog: options.watchdog }));
+  }
+
+  if (options.documentWorkflow) {
+    app.use(
+      createDocumentWorkflowRouter({
+        documentWorkflow: options.documentWorkflow,
+        zotero: options.zotero,
+        office: options.officeCli
+      })
+    );
   }
 
   app.get("/api/queue/config", async (_request, response) => {
