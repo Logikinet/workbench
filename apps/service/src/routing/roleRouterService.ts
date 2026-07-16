@@ -780,7 +780,12 @@ function scoreRole(
   let score = 0;
 
   if (!role.enabled) rejectReasons.push("角色已停用");
-  if (!role.allowFirstmateAutoInvoke) rejectReasons.push("未允许 Firstmate 自动调用 (allowFirstmateAutoInvoke=false)");
+  // Soft preference only: local todos flow needs auto multi-agent dispatch even when
+  // roles were created without the Firstmate auto-invoke flag.
+  if (!role.allowFirstmateAutoInvoke) {
+    matchReasons.push("allowFirstmateAutoInvoke=false（仍可编排，优先勾选自动调用的角色）");
+    score -= 8;
+  }
 
   const harness = req.harness;
   if (harness && role.harness !== harness) {
@@ -795,8 +800,10 @@ function scoreRole(
 
   const missingSkills = needed.skills.filter((s) => !role.skills.includes(s));
   const coveredSkills = needed.skills.filter((s) => role.skills.includes(s));
+  // Skills are soft: multi-agent plans often list generic caps; do not hard-block enabled roles.
   if (missingSkills.length > 0) {
-    rejectReasons.push(`缺少 Skills: ${missingSkills.join(", ")}`);
+    matchReasons.push(`Skills 部分缺失: ${missingSkills.join(", ")}`);
+    score -= missingSkills.length * 2;
   } else if (needed.skills.length > 0) {
     matchReasons.push(`Skills 覆盖: ${coveredSkills.join(", ")}`);
     score += 15 + coveredSkills.length * 3;
@@ -807,7 +814,8 @@ function scoreRole(
   const missingTools = needed.tools.filter((t) => !role.tools.includes(t));
   const coveredTools = needed.tools.filter((t) => role.tools.includes(t));
   if (missingTools.length > 0) {
-    rejectReasons.push(`缺少 Tools: ${missingTools.join(", ")}`);
+    matchReasons.push(`Tools 部分缺失: ${missingTools.join(", ")}`);
+    score -= missingTools.length * 2;
   } else if (needed.tools.length > 0) {
     matchReasons.push(`Tools 覆盖: ${coveredTools.join(", ")}`);
     score += 15 + coveredTools.length * 3;
@@ -856,8 +864,17 @@ function scoreRole(
     matchReasons.push("allowFirstmateAutoInvoke=true");
     score += 10;
   }
+  // Prefer roles that already have a model connection so Firstmate can start them.
+  if (role.connectionId) {
+    matchReasons.push("已绑定模型连接");
+    score += 12;
+  } else if (role.harness === "api") {
+    matchReasons.push("API 角色未绑定连接（编排时可能失败）");
+    score -= 15;
+  }
 
-  const eligible = rejectReasons.length === 0 && role.enabled && role.allowFirstmateAutoInvoke;
+  // Eligible = enabled + no hard rejects. Auto-invoke flag only affects ranking.
+  const eligible = rejectReasons.length === 0 && role.enabled;
 
   return {
     roleId: role.id,

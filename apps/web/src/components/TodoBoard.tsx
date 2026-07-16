@@ -1,30 +1,69 @@
-import { useEffect, useState } from "react";
+/**
+ * todos.dev Todos board:
+ * list + Task › Plan › Build + primary CTA (开始规划 / 确认并构建)
+ */
+
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { createChatBridge } from "../lib/chatBridge.js";
 import { createProjectClient, type ProjectRecord } from "../lib/projects.js";
+import { createRunClient, type RunRecord } from "../lib/runs.js";
 import {
   createTodoClient,
-  todoStatuses,
-  todoVisibleInView,
-  type TodoRecord,
-  type TodoStatus
+  type TodoRecord
 } from "../lib/todos.js";
+import {
+  deriveTodosPhase,
+  layerState,
+  phaseLabels,
+  primaryActionForPhase,
+  type TodosPhase
+} from "../lib/todosFlow.js";
 import { RunTimelinePanel } from "./RunTimelinePanel.js";
+import {
+  ListIcon,
+  TdsEmpty,
+  TdsGhostButton,
+  TdsPage,
+  TdsPrimaryButton
+} from "./TdsPage.js";
 
 interface TodoBoardProps {
   serviceUrl: string;
   available: boolean;
   dataEpoch?: number;
-  /** Deep-link focus: open Run detail for this Todo when present. */
   focusTodoId?: string;
   onFocusTodo?(todoId: string | undefined): void;
 }
 
-const statusLabels: Record<TodoStatus, string> = {
-  pending: "待处理",
-  running: "运行中",
-  awaiting_confirmation: "等待确认",
-  awaiting_acceptance: "待验收",
-  completed: "已完成"
+type BoardFilter = "all" | TodosPhase | "archived";
+
+const filterLabels: Record<BoardFilter, string> = {
+  all: "全部",
+  todo: "To Do",
+  planning: "Planning",
+  confirm: "Plan ready",
+  building: "Building",
+  review: "Review",
+  done: "Done",
+  blocked: "Need you",
+  failed: "Failed",
+  archived: "已归档"
 };
+
+function LayerTrack({ phase }: { phase: TodosPhase }) {
+  const layers = layerState(phase);
+  const cls = (s: "idle" | "active" | "done") =>
+    `tds-layer-chip${s === "done" ? " is-done" : ""}${s === "active" ? " is-active" : ""}`;
+  return (
+    <div className="tds-layer-track" aria-label="Task Plan Build">
+      <span className={cls(layers.task)}>Task</span>
+      <span className="tds-layer-sep">›</span>
+      <span className={cls(layers.plan)}>Plan</span>
+      <span className="tds-layer-sep">›</span>
+      <span className={cls(layers.build)}>Build</span>
+    </div>
+  );
+}
 
 export function TodoBoard({
   serviceUrl,
@@ -34,71 +73,92 @@ export function TodoBoard({
   onFocusTodo
 }: TodoBoardProps) {
   const todosClient = createTodoClient(serviceUrl);
+  const runsClient = createRunClient(serviceUrl);
   const projectsClient = createProjectClient(serviceUrl);
+  const bridge = useMemo(() => createChatBridge(serviceUrl), [serviceUrl]);
+
   const [todos, setTodos] = useState<TodoRecord[]>([]);
+  const [runsByTodo, setRunsByTodo] = useState<Record<string, RunRecord | undefined>>({});
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
-  const [status, setStatus] = useState<TodoStatus>("pending");
+  const [filter, setFilter] = useState<BoardFilter>("all");
   const [query, setQuery] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
   const [draft, setDraft] = useState({ title: "", description: "", projectId: "" });
-  const [editing, setEditing] = useState<TodoRecord | null>(null);
-  const [editDraft, setEditDraft] = useState({ title: "", description: "", projectId: "" });
   const [runTodo, setRunTodo] = useState<TodoRecord | null>(null);
   const [notice, setNotice] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
 
   const reload = async () => {
     if (!available) return;
     try {
       const [nextTodos, nextProjects] = await Promise.all([
-        todosClient.list(showArchived ? { archived: true } : { status, query }),
+        todosClient.list(filter === "archived" ? { archived: true } : {}),
         projectsClient.list()
       ]);
       setTodos(nextTodos);
-      setProjects(nextProjects.filter((project) => project.status === "active"));
-      setNotice("");
+      setProjects(nextProjects.filter((p) => p.status === "active"));
+
+      // Latest run per todo (capped concurrency)
+      const map: Record<string, RunRecord | undefined> = {};
+      const batchSize = 6;
+      for (let i = 0; i < nextTodos.length; i += batchSize) {
+        const batch = nextTodos.slice(i, i + batchSize);
+        await Promise.all(
+          batch.map(async (todo) => {
+            try {
+              const history = await runsClient.list(todo.id);
+              map[todo.id] = history[0];
+            } catch {
+              map[todo.id] = undefined;
+            }
+          })
+        );
+      }
+      setRunsByTodo(map);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "无法读取 Todo");
+      setNotice(error instanceof Error ? error.message : "无法读取 Todos");
     }
   };
 
   useEffect(() => {
     void reload();
-  }, [available, status, query, showArchived, dataEpoch]);
+  }, [available, filter, dataEpoch]);
 
-  // Deep-link: resolve focusTodoId into the Run detail panel (may need unfiltered fetch).
   useEffect(() => {
     if (!available || !focusTodoId) {
       if (!focusTodoId) setRunTodo(null);
       return;
     }
-    if (runTodo?.id === focusTodoId) return;
-    const fromList = todos.find((entry) => entry.id === focusTodoId);
-    if (fromList) {
-      setRunTodo(fromList);
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const all = await todosClient.list({});
-        const found = all.find((entry) => entry.id === focusTodoId);
-        if (!cancelled && found) {
-          setRunTodo(found);
-          setStatus(found.status);
-          setShowArchived(found.archived);
-        } else if (!cancelled) {
-          setNotice("未找到对应 Todo。");
-        }
-      } catch (error) {
-        if (!cancelled) setNotice(error instanceof Error ? error.message : "无法打开 Todo");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [available, focusTodoId, todos, runTodo?.id]);
+    const found = todos.find((t) => t.id === focusTodoId);
+    if (found) setRunTodo(found);
+  }, [available, focusTodoId, todos]);
 
-  const createTodo = async (event: React.FormEvent) => {
+  const rows = useMemo(() => {
+    const q = query.trim().toLocaleLowerCase();
+    return todos
+      .map((todo) => {
+        const run = runsByTodo[todo.id];
+        const phase = deriveTodosPhase(todo, run);
+        return { todo, run, phase };
+      })
+      .filter(({ todo, phase }) => {
+        if (filter === "archived") return todo.archived;
+        if (todo.archived) return false;
+        if (filter !== "all" && phase !== filter) return false;
+        if (!q) return true;
+        return `${todo.title}\n${todo.description ?? ""}`.toLocaleLowerCase().includes(q);
+      });
+  }, [todos, runsByTodo, filter, query]);
+
+  const planReadyIds = useMemo(
+    () =>
+      rows
+        .filter((r) => r.phase === "confirm" && r.run)
+        .map((r) => r.run!.id),
+    [rows]
+  );
+
+  const createTodo = async (event: FormEvent) => {
     event.preventDefault();
     try {
       const todo = await todosClient.create({
@@ -107,150 +167,249 @@ export function TodoBoard({
         projectId: draft.projectId || undefined
       });
       setDraft({ title: "", description: "", projectId: "" });
-      if (!showArchived && todo.status === status) setTodos((current) => [todo, ...current]);
-      setNotice("Todo 已创建。");
+      setComposerOpen(false);
+      // todos: immediately start planning
+      const planned = await bridge.startTodoPlan(
+        todo.id,
+        [todo.title, todo.description].filter(Boolean).join("\n")
+      );
+      setTodos((c) => [todo, ...c.filter((t) => t.id !== todo.id)]);
+      setRunsByTodo((c) => ({ ...c, [todo.id]: planned.run }));
+      setNotice(planned.notice);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "无法创建 Todo");
+      setNotice(error instanceof Error ? error.message : "无法创建");
     }
   };
 
-  const updateTodo = async (todo: TodoRecord, update: Parameters<typeof todosClient.update>[1]) => {
+  const runPrimary = async (todo: TodoRecord, phase: TodosPhase, run?: RunRecord) => {
+    if (busyId) return;
+    setBusyId(todo.id);
     try {
-      const changed = await todosClient.update(todo.id, update);
-      setTodos((current) => {
-        if (!todoVisibleInView(changed, { status, showArchived, query })) {
-          return current.filter((entry) => entry.id !== changed.id);
+      const action = primaryActionForPhase(phase);
+      if (action.id === "confirm_build" && run) {
+        const result = await bridge.confirmToBuild(run.id);
+        setRunsByTodo((c) => ({ ...c, [todo.id]: result.run }));
+        setNotice(result.notice);
+        setRunTodo(todo);
+        onFocusTodo?.(todo.id);
+      } else if (action.id === "start_plan") {
+        const result = await bridge.startTodoPlan(
+          todo.id,
+          [todo.title, todo.description].filter(Boolean).join("\n") || "请规划此任务"
+        );
+        setRunsByTodo((c) => ({ ...c, [todo.id]: result.run }));
+        setNotice(result.notice);
+        if (result.phase === "confirm") {
+          setRunTodo(todo);
         }
-        return current.map((entry) => (entry.id === changed.id ? changed : entry));
-      });
-      setNotice("Todo 已更新。");
+      } else {
+        setRunTodo(todo);
+        onFocusTodo?.(todo.id);
+      }
+      await reload();
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "无法更新 Todo");
+      setNotice(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setBusyId(null);
     }
   };
 
-  const edit = (todo: TodoRecord) => {
-    setEditing(todo);
-    setEditDraft({ title: todo.title, description: todo.description ?? "", projectId: todo.projectId ?? "" });
-  };
-
-  const saveEdit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!editing) return;
-    await updateTodo(editing, {
-      title: editDraft.title,
-      description: editDraft.description,
-      projectId: editDraft.projectId || null
-    });
-    setEditing(null);
+  const runAllReady = async () => {
+    if (!planReadyIds.length || busyId) return;
+    setBusyId("__batch__");
+    try {
+      const result = await bridge.confirmMany(planReadyIds);
+      setNotice(`已确认 ${result.ok} 个构建${result.fail ? `，失败 ${result.fail}` : ""}`);
+      await reload();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "批量确认失败");
+    } finally {
+      setBusyId(null);
+    }
   };
 
   return (
-    <section className="workspace-panel" aria-labelledby="todos-title">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">TODOS</p>
-          <h2 id="todos-title">任务看板</h2>
+    <TdsPage
+      kicker="Board"
+      title="Todos"
+      description="Task › Plan › Build。规划完成后点「确认并构建」——和 todos.dev 同一操作。"
+      action={
+        <div className="tds-inline-actions">
+          {planReadyIds.length > 0 ? (
+            <TdsPrimaryButton
+              onClick={() => void runAllReady()}
+              disabled={!available || !!busyId}
+            >
+              Run {planReadyIds.length}
+            </TdsPrimaryButton>
+          ) : null}
+          <TdsGhostButton onClick={() => void reload()} disabled={!available}>
+            刷新
+          </TdsGhostButton>
+          <TdsPrimaryButton onClick={() => setComposerOpen((v) => !v)} disabled={!available}>
+            + 新建
+          </TdsPrimaryButton>
         </div>
-        <button type="button" className="quiet-button" onClick={() => void reload()} disabled={!available}>刷新</button>
-      </div>
-      <form className="todo-form" onSubmit={createTodo}>
-        <input required aria-label="Todo 标题" placeholder="快速创建 Todo" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
-        <input aria-label="Todo 描述" placeholder="可选描述" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
-        <select aria-label="归属 Project" value={draft.projectId} onChange={(event) => setDraft({ ...draft, projectId: event.target.value })}>
-          <option value="">暂不归属 Project</option>
-          {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-        </select>
-        <button type="submit" disabled={!available}>创建 Todo</button>
-      </form>
-      <div className="todo-toolbar">
-        <div className="status-tabs" role="tablist" aria-label="Todo 状态">
-          {todoStatuses.map((entry) => (
-            <button key={entry} type="button" className={status === entry && !showArchived ? "active-tab" : "quiet-button"} onClick={() => { setShowArchived(false); setStatus(entry); }}>
-              {statusLabels[entry]}
-            </button>
-          ))}
-          <button type="button" className={showArchived ? "active-tab" : "quiet-button"} onClick={() => setShowArchived(true)}>已归档</button>
-        </div>
-        <input aria-label="搜索 Todo" placeholder="搜索" value={query} onChange={(event) => setQuery(event.target.value)} disabled={showArchived} />
-      </div>
-      {editing && (
-        <form className="todo-edit-panel" onSubmit={saveEdit}>
-          <strong>编辑 Todo</strong>
-          <input required aria-label="编辑标题" value={editDraft.title} onChange={(event) => setEditDraft({ ...editDraft, title: event.target.value })} />
-          <input aria-label="编辑描述" value={editDraft.description} onChange={(event) => setEditDraft({ ...editDraft, description: event.target.value })} />
-          <select aria-label="编辑归属 Project" value={editDraft.projectId} onChange={(event) => setEditDraft({ ...editDraft, projectId: event.target.value })}>
-            <option value="">暂不归属 Project</option>
-            {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
-          <div className="project-actions">
-            <button type="submit">保存</button>
-            <button type="button" className="quiet-button" onClick={() => setEditing(null)}>取消</button>
+      }
+    >
+      {composerOpen ? (
+        <form className="tds-form tds-form-wide" onSubmit={(e) => void createTodo(e)}>
+          <label className="tds-field">
+            <span>任务</span>
+            <input
+              required
+              autoFocus
+              placeholder="希望 Agent 做什么？"
+              value={draft.title}
+              onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+            />
+          </label>
+          <label className="tds-field">
+            <span>说明</span>
+            <input
+              placeholder="可选"
+              value={draft.description}
+              onChange={(e) => setDraft({ ...draft, description: e.target.value })}
+            />
+          </label>
+          <label className="tds-field">
+            <span>项目</span>
+            <select
+              value={draft.projectId}
+              onChange={(e) => setDraft({ ...draft, projectId: e.target.value })}
+            >
+              <option value="">默认工作区</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="tds-form-actions">
+            <TdsPrimaryButton type="submit">创建并开始规划</TdsPrimaryButton>
+            <TdsGhostButton onClick={() => setComposerOpen(false)}>取消</TdsGhostButton>
           </div>
         </form>
-      )}
-      {notice && <p className="notice" role="status">{notice}</p>}
-      {runTodo && (
+      ) : null}
+
+      <div className="tds-filter-row">
+        {(
+          ["all", "todo", "planning", "confirm", "building", "review", "done", "blocked", "archived"] as BoardFilter[]
+        ).map((entry) => (
+          <button
+            key={entry}
+            type="button"
+            className={filter === entry ? "tds-filter-chip active" : "tds-filter-chip"}
+            onClick={() => setFilter(entry)}
+          >
+            {filterLabels[entry]}
+          </button>
+        ))}
+        <input
+          className="tds-inline-search"
+          placeholder="搜索…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      </div>
+
+      {notice ? <div className="tds-banner ok">{notice}</div> : null}
+
+      {runTodo ? (
         <RunTimelinePanel
           serviceUrl={serviceUrl}
           todo={runTodo}
           onClose={() => {
             setRunTodo(null);
             onFocusTodo?.(undefined);
+            void reload();
           }}
           onTodoChange={(changed) => {
             setRunTodo(changed);
-            setTodos((current) => {
-              if (!todoVisibleInView(changed, { status, showArchived, query })) {
-                return current.filter((entry) => entry.id !== changed.id);
-              }
-              return current.some((entry) => entry.id === changed.id)
-                ? current.map((entry) => (entry.id === changed.id ? changed : entry))
-                : [changed, ...current];
-            });
+            setTodos((c) => c.map((t) => (t.id === changed.id ? changed : t)));
           }}
         />
-      )}
-      <ul className="todo-list">
-        {todos.map((todo) => (
-          <li key={todo.id} className={runTodo?.id === todo.id ? "todo-focused" : undefined}>
-            <div>
-              <strong>{todo.title}</strong>
-              {todo.description && <small>{todo.description}</small>}
-              <span>{showArchived ? "已归档" : statusLabels[todo.status]}</span>
-            </div>
-            <div className="project-actions">
-              {!showArchived && (
-                <select
-                  aria-label={`${todo.title} 状态`}
-                  value={todo.status}
-                  onChange={(event) => void updateTodo(todo, { status: event.target.value as TodoStatus })}
-                >
-                  {todoStatuses
-                    .filter((entry) => entry !== "completed" || todo.status === "completed")
-                    .map((entry) => (
-                      <option key={entry} value={entry} disabled={entry === "completed"}>
-                        {statusLabels[entry]}{entry === "completed" ? "（需审查验收）" : ""}
-                      </option>
-                    ))}
-                </select>
-              )}
-              <button
-                type="button"
-                className={runTodo?.id === todo.id ? "active-tab" : "quiet-button"}
-                onClick={() => {
-                  setRunTodo(todo);
-                  onFocusTodo?.(todo.id);
-                }}
+      ) : null}
+
+      {rows.length === 0 ? (
+        <TdsEmpty
+          icon={<ListIcon />}
+          title="还没有 Todo"
+          description="在 Chief 说话，或点「+ 新建」。规划完成后确认并构建。"
+          action={
+            <TdsPrimaryButton onClick={() => setComposerOpen(true)}>+ 新建 Todo</TdsPrimaryButton>
+          }
+        />
+      ) : (
+        <div className="tds-todo-list">
+          {rows.map(({ todo, run, phase }) => {
+            const busy = busyId === todo.id;
+            const action = primaryActionForPhase(phase);
+            return (
+              <article
+                key={todo.id}
+                className={`tds-todo-row${runTodo?.id === todo.id ? " is-active" : ""}`}
               >
-                Runs
-              </button>
-              <button type="button" className="quiet-button" onClick={() => edit(todo)}>编辑</button>
-              <button type="button" className="quiet-button" onClick={() => void updateTodo(todo, { archived: !todo.archived })}>{todo.archived ? "恢复" : "归档"}</button>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </section>
+                <button
+                  type="button"
+                  className="tds-todo-main"
+                  onClick={() => {
+                    setRunTodo(todo);
+                    onFocusTodo?.(todo.id);
+                  }}
+                >
+                  <div className="tds-todo-title-row">
+                    <h3>{todo.title}</h3>
+                    <span
+                      className={`tds-chip ${
+                        phase === "building"
+                          ? "success"
+                          : phase === "confirm" || phase === "blocked"
+                            ? "warn"
+                            : "default"
+                      }`}
+                    >
+                      {phaseLabels[phase]}
+                    </span>
+                  </div>
+                  {todo.description ? (
+                    <p className="tds-muted tds-todo-desc">{todo.description}</p>
+                  ) : null}
+                  <LayerTrack phase={phase} />
+                </button>
+                <div className="tds-todo-actions">
+                  {action.id !== "none" ? (
+                    <TdsPrimaryButton
+                      disabled={!available || busy || (action.id === "view" && phase === "planning")}
+                      onClick={() => void runPrimary(todo, phase, run)}
+                    >
+                      {busy ? "…" : action.label}
+                    </TdsPrimaryButton>
+                  ) : null}
+                  <TdsGhostButton
+                    onClick={() => {
+                      setRunTodo(todo);
+                      onFocusTodo?.(todo.id);
+                    }}
+                  >
+                    打开
+                  </TdsGhostButton>
+                  <TdsGhostButton
+                    onClick={() =>
+                      void todosClient
+                        .update(todo.id, { archived: !todo.archived })
+                        .then(() => reload())
+                    }
+                  >
+                    {todo.archived ? "恢复" : "归档"}
+                  </TdsGhostButton>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </TdsPage>
   );
 }

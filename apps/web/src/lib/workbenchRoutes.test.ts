@@ -5,37 +5,54 @@ import {
   parseWorkbenchHash
 } from "./workbenchRoutes.js";
 
-describe("workbench hash routes", () => {
-  it("parses home and empty hashes", () => {
+describe("workbench hash routes (todos.dev IA)", () => {
+  it("parses chief as home", () => {
     expect(parseWorkbenchHash("")).toEqual({ section: "home" });
-    expect(parseWorkbenchHash("#")).toEqual({ section: "home" });
-    expect(parseWorkbenchHash("#/")).toEqual({ section: "home" });
+    expect(parseWorkbenchHash("#/chief")).toEqual({ section: "home" });
     expect(parseWorkbenchHash("#/home")).toEqual({ section: "home" });
   });
 
-  it("parses todos list and todo detail", () => {
+  it("parses inbox and todos panel", () => {
+    expect(parseWorkbenchHash("#/inbox")).toEqual({ section: "waiting" });
     expect(parseWorkbenchHash("#/todos")).toEqual({ section: "todos" });
-    expect(parseWorkbenchHash("#/todos/todo%2F1")).toEqual({ section: "todos", todoId: "todo/1" });
+    expect(parseWorkbenchHash("#/todos/todo%2F1")).toEqual({
+      section: "todos",
+      todoId: "todo/1"
+    });
   });
 
-  it("parses named sections and waiting aliases", () => {
-    expect(parseWorkbenchHash("#/projects")).toEqual({ section: "projects" });
+  it("parses panel=todo: on any route", () => {
+    expect(parseWorkbenchHash("#/chief?panel=todo:abc")).toEqual({
+      section: "home",
+      todoId: "abc"
+    });
+    expect(parseWorkbenchHash("#/resources/providers?panel=todo:xyz")).toEqual({
+      section: "connections",
+      todoId: "xyz"
+    });
+  });
+
+  it("parses resources and team", () => {
+    expect(parseWorkbenchHash("#/resources/providers")).toEqual({ section: "connections" });
+    expect(parseWorkbenchHash("#/resources/skills")).toEqual({ section: "skills" });
+    expect(parseWorkbenchHash("#/resources/secrets")).toEqual({ section: "secrets" });
+    expect(parseWorkbenchHash("#/app")).toEqual({ section: "team" });
     expect(parseWorkbenchHash("#/agents")).toEqual({ section: "agents" });
-    expect(parseWorkbenchHash("#/connections")).toEqual({ section: "connections" });
-    expect(parseWorkbenchHash("#/settings")).toEqual({ section: "settings" });
-    expect(parseWorkbenchHash("#/waiting")).toEqual({ section: "waiting" });
-    expect(parseWorkbenchHash("#/waiting-on-me")).toEqual({ section: "waiting" });
+    expect(parseWorkbenchHash("#/projects/p1")).toEqual({
+      section: "projects",
+      projectId: "p1"
+    });
   });
 
-  it("falls back to home for unknown paths", () => {
-    expect(parseWorkbenchHash("#/unknown-page")).toEqual({ section: "home" });
-  });
-
-  it("formats hashes and nav active state", () => {
-    expect(formatWorkbenchHash({ section: "home" })).toBe("#/home");
-    expect(formatWorkbenchHash({ section: "todos" })).toBe("#/todos");
-    expect(formatWorkbenchHash({ section: "todos", todoId: "a/b" })).toBe("#/todos/a%2Fb");
+  it("formats hashes like todos paths", () => {
+    expect(formatWorkbenchHash({ section: "home" })).toBe("#/chief");
+    expect(formatWorkbenchHash({ section: "waiting" })).toBe("#/inbox");
+    expect(formatWorkbenchHash({ section: "connections" })).toBe("#/resources/providers");
+    expect(formatWorkbenchHash({ section: "skills" })).toBe("#/resources/skills");
+    expect(formatWorkbenchHash({ section: "team" })).toBe("#/app");
+    expect(formatWorkbenchHash({ section: "home", todoId: "t1" })).toBe(
+      "#/chief?panel=todo:t1"
+    );
     expect(isNavSectionActive({ section: "todos", todoId: "x" }, "todos")).toBe(true);
-    expect(isNavSectionActive({ section: "home" }, "waiting")).toBe(false);
   });
 });

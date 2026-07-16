@@ -26,3 +26,18 @@ export {
   type ConfigChangeEvent,
   type ConfigChangeListener
 } from "./hotReload.js";
+
+export { ProviderService, type ProviderServiceOptions } from "./providerService.js";
+export { mountProviderApiRoutes } from "./providerApiRoutes.js";
+export { getProviderAdapter } from "./providerAdapters.js";
+export { PROVIDER_CLI_PRESETS } from "./providerCatalog.js";
+export {
+  type ProviderConnection,
+  type ProviderModel,
+  type ProviderTestResult,
+  type CreateProviderInput,
+  type ProviderAdapterKind,
+  type ProviderAuthMode,
+  type ProviderStatus,
+  type ProviderPresetChoice
+} from "./providerTypes.js";

@@ -5,6 +5,17 @@ import {
   type InterruptedRunSummaryRecord,
   type RunRecord
 } from "../lib/runs.js";
+import {
+  EmptyHint,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  Stack,
+  Tag
+} from "./ui.js";
 
 interface CheckpointRecoveryPanelProps {
   serviceUrl: string;
@@ -67,74 +78,88 @@ export function CheckpointRecoveryPanel({
 
   const checkpoints = detail?.checkpoints ?? run.checkpoints ?? [];
   const recovery = detail?.checkpointRecovery ?? run.checkpointRecovery;
-  const recoveryWorthy = ["interrupted", "paused", "failed"].includes(run.status)
-    || recovery?.status === "conflict"
-    || recovery?.status === "awaiting_dangerous_reapproval"
-    || (run.execution.status === "failed" && run.execution.retryable);
+  const recoveryWorthy =
+    ["interrupted", "paused", "failed"].includes(run.status) ||
+    recovery?.status === "conflict" ||
+    recovery?.status === "awaiting_dangerous_reapproval" ||
+    (run.execution.status === "failed" && run.execution.retryable);
   const showRecovery = recoveryWorthy || checkpoints.length > 0;
 
   if (!showRecovery) return null;
 
   return (
-    <section className="checkpoint-panel" aria-label="检查点与中断恢复">
-      <header>
-        <p className="eyebrow">CHECKPOINT RECOVERY</p>
-        <h4>步骤检查点与中断恢复</h4>
-      </header>
-      <p className="checkpoint-note">
-        {detail?.recoveryNote
-          ?? recovery?.recoveryNote
-          ?? "恢复通过批准计划与最近检查点重建模型会话上下文；不会恢复原模型内部会话状态。"}
-      </p>
-      {recovery && (
-        <div className="checkpoint-recovery-state" role="status">
-          <span className={`tag ${recovery.status === "conflict" ? "archived" : "active"}`}>{recovery.status}</span>
-          {recovery.interruptedStep && <small>中断步骤：{recovery.interruptedStep}</small>}
-          {recovery.conflictReason && <p className="notice">{recovery.conflictReason}</p>}
-          {recovery.requiresDangerousReapproval && <p className="notice">危险操作需再次确认后才会重放。</p>}
+    <Panel
+      eyebrow="CHECKPOINT RECOVERY"
+      title="步骤检查点与中断恢复"
+      description={
+        detail?.recoveryNote ??
+        recovery?.recoveryNote ??
+        "恢复通过批准计划与最近检查点重建模型会话上下文；不会恢复原模型内部会话状态。"
+      }
+    >
+      {recovery ? (
+        <div className="flex flex-wrap items-center gap-2" role="status">
+          <Tag color={recovery.status === "conflict" ? "danger" : "accent"}>{recovery.status}</Tag>
+          {recovery.interruptedStep ? (
+            <EmptyHint>中断步骤：{recovery.interruptedStep}</EmptyHint>
+          ) : null}
+          {recovery.conflictReason ? <Notice tone="warning">{recovery.conflictReason}</Notice> : null}
+          {recovery.requiresDangerousReapproval ? (
+            <Notice tone="warning">危险操作需再次确认后才会重放。</Notice>
+          ) : null}
         </div>
-      )}
-      {checkpoints.length > 0 && (
-        <ol className="checkpoint-list">
+      ) : null}
+
+      {checkpoints.length > 0 ? (
+        <Stack>
           {checkpoints.map((checkpoint) => (
-            <li key={checkpoint.id}>
-              <strong>#{checkpoint.sequence} · {checkpoint.stepStatus}</strong>
-              <span>{checkpoint.step}</span>
-              <small>{checkpoint.summary}</small>
-              {checkpoint.nextStep && <small>下一步：{checkpoint.nextStep}</small>}
-              {checkpoint.dangerous && <small className="danger-label">危险步骤</small>}
-              {checkpoint.artifactPaths.length > 0 && <small>成果：{checkpoint.artifactPaths.join("、")}</small>}
-            </li>
+            <ListCard key={checkpoint.id}>
+              <strong>
+                #{checkpoint.sequence} · {checkpoint.stepStatus}
+              </strong>
+              <p className="m-0 text-sm">{checkpoint.step}</p>
+              <EmptyHint>{checkpoint.summary}</EmptyHint>
+              {checkpoint.nextStep ? <EmptyHint>下一步：{checkpoint.nextStep}</EmptyHint> : null}
+              {checkpoint.dangerous ? <Tag color="danger">危险步骤</Tag> : null}
+              {checkpoint.artifactPaths.length > 0 ? (
+                <EmptyHint>成果：{checkpoint.artifactPaths.join("、")}</EmptyHint>
+              ) : null}
+            </ListCard>
           ))}
-        </ol>
-      )}
-      {interrupted.length > 0 && (
-        <div className="interrupted-runs">
+        </Stack>
+      ) : null}
+
+      {interrupted.length > 0 ? (
+        <Stack>
           <strong>本 Todo 可恢复 Run</strong>
-          <ul>
-            {interrupted.map((entry) => (
-              <li key={entry.runId}>
+          {interrupted.map((entry) => (
+            <ListCard key={entry.runId}>
+              <p className="m-0 text-sm">
                 第 {entry.attempt} 次 · {entry.status}
-                {entry.completedSteps.length > 0 && ` · 已完成 ${entry.completedSteps.length} 步`}
-                {entry.interruptedStep && ` · 中断于 ${entry.interruptedStep}`}
-                {entry.failedSteps.length > 0 && ` · 失败/中断 ${entry.failedSteps.length} 步`}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {!readOnly && recoveryWorthy && (
-        <div className="checkpoint-actions">
-          <button type="button" disabled={busy || run.execution.terminationUnconfirmed} onClick={() => void resume(false)}>
+                {entry.completedSteps.length > 0 ? ` · 已完成 ${entry.completedSteps.length} 步` : ""}
+                {entry.interruptedStep ? ` · 中断于 ${entry.interruptedStep}` : ""}
+                {entry.failedSteps.length > 0 ? ` · 失败/中断 ${entry.failedSteps.length} 步` : ""}
+              </p>
+            </ListCard>
+          ))}
+        </Stack>
+      ) : null}
+
+      {!readOnly && recoveryWorthy ? (
+        <RowActions>
+          <PrimaryButton
+            isDisabled={busy || run.execution.terminationUnconfirmed}
+            onPress={() => void resume(false)}
+          >
             从检查点恢复
-          </button>
-          {(recovery?.requiresDangerousReapproval || recovery?.status === "awaiting_dangerous_reapproval") && (
-            <button type="button" className="quiet-button" disabled={busy} onClick={() => void resume(true)}>
+          </PrimaryButton>
+          {recovery?.requiresDangerousReapproval || recovery?.status === "awaiting_dangerous_reapproval" ? (
+            <QuietButton isDisabled={busy} onPress={() => void resume(true)}>
               确认危险步骤并恢复
-            </button>
-          )}
-        </div>
-      )}
-    </section>
+            </QuietButton>
+          ) : null}
+        </RowActions>
+      ) : null}
+    </Panel>
   );
 }

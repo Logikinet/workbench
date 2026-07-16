@@ -4,6 +4,14 @@ import {
   type BackupImportResult,
   type BackupPackage
 } from "../lib/backup.js";
+import {
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  Stack,
+  Tag
+} from "./ui.js";
 
 interface BackupPanelProps {
   serviceUrl: string;
@@ -72,26 +80,25 @@ export function BackupPanel({ serviceUrl, available, onImportSuccess }: BackupPa
   };
 
   return (
-    <section className="workspace-panel" aria-labelledby="backup-title">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">BACKUP &amp; MIGRATION</p>
-          <h2 id="backup-title">备份与迁移</h2>
-        </div>
-      </div>
-      <p className="backup-help">
-        导出 Project 索引、Todo、Run、Agent Role、非敏感设置与 .workbench 记录。不会打包 API Key、账号密码、Harness
-        凭据或大型项目文件。导入请求体上限 50MB（其他接口仍为 1MB）。
-      </p>
-      <div className="project-actions backup-actions">
-        <button type="button" disabled={!available || busy} onClick={() => void downloadExport()}>
+    <Panel
+      eyebrow="BACKUP & MIGRATION"
+      title="备份与迁移"
+      description="导出 Project 索引、Todo、Run、Agent Role、非敏感设置与 .workbench 记录。不会打包 API Key、账号密码、Harness 凭据或大型项目文件。导入请求体上限 50MB（其他接口仍为 1MB）。"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <PrimaryButton isDisabled={!available || busy} onPress={() => void downloadExport()}>
           导出备份 JSON
-        </button>
-        <label className={`file-import-label ${!available || busy ? "disabled" : ""}`}>
+        </PrimaryButton>
+        <label
+          className={`inline-flex cursor-pointer items-center rounded-lg border border-border bg-field px-3 py-2 text-sm font-medium text-foreground ${
+            !available || busy ? "pointer-events-none opacity-50" : ""
+          }`}
+        >
           导入备份 JSON
           <input
             type="file"
             accept="application/json,.json"
+            className="sr-only"
             disabled={!available || busy}
             onChange={(event) => {
               const file = event.target.files?.[0];
@@ -101,36 +108,39 @@ export function BackupPanel({ serviceUrl, available, onImportSuccess }: BackupPa
           />
         </label>
       </div>
-      {notice && (
-        <p className="notice" role="status">
-          {notice}
-        </p>
-      )}
-      {lastImport && (
-        <div className="backup-result">
-          <p>
+
+      {notice ? <Notice>{notice}</Notice> : null}
+
+      {lastImport ? (
+        <Stack>
+          <p className="m-0 text-sm text-foreground">
             已关联工作区 {lastImport.relinkedWorkspaces} 个；待修复{" "}
             {lastImport.needsRepairProjects.length} 个。
           </p>
-          {lastImport.needsRepairProjects.length > 0 && (
-            <ul className="backup-repair-list">
+          {lastImport.needsRepairProjects.length > 0 ? (
+            <Stack>
               {lastImport.needsRepairProjects.map((entry) => (
-                <li key={entry.projectId}>
-                  <strong>{entry.projectName}</strong>
-                  <span>{entry.workspacePath}</span>
-                </li>
+                <ListCard
+                  key={entry.projectId}
+                  actions={<Tag color="warning">待修复</Tag>}
+                >
+                  <strong className="block text-sm text-foreground">{entry.projectName}</strong>
+                  <span className="block text-sm text-muted break-all">{entry.workspacePath}</span>
+                </ListCard>
               ))}
-            </ul>
-          )}
-          {lastImport.warnings.length > 0 && (
-            <ul className="backup-warning-list">
+            </Stack>
+          ) : null}
+          {lastImport.warnings.length > 0 ? (
+            <Stack>
               {lastImport.warnings.map((warning) => (
-                <li key={warning}>{warning}</li>
+                <Notice key={warning} tone="warning">
+                  {warning}
+                </Notice>
               ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </section>
+            </Stack>
+          ) : null}
+        </Stack>
+      ) : null}
+    </Panel>
   );
 }

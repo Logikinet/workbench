@@ -22,7 +22,10 @@ import {
 import type { GitWorktreeService } from "../git/gitWorktreeService.js";
 import { registerWorktreeApplyRoutes } from "../git/worktreeRoutes.js";
 import { mountConnectionRoutes } from "../connections/connectionRoutes.js";
+import { mountGithubRoutes } from "../github/githubRoutes.js";
+import type { GithubService } from "../github/githubService.js";
 import { mountProviderRoutes } from "../providers/providerRoutes.js";
+import { mountProviderApiRoutes } from "../providers/providerApiRoutes.js";
 import { createPlanningRouter } from "../planning/planningRoutes.js";
 import type { AiPlanningService } from "../planning/aiPlanningService.js";
 import { createAskUserRouter } from "../askUser/askUserRoutes.js";
@@ -65,6 +68,8 @@ export interface ServiceAppOptions {
   /** Optional built PWA dist directory served on the same loopback origin as the API. */
   webRoot?: string;
   projects?: ProjectService;
+  /** todos-style GitHub account + repo → Project binding. */
+  github?: GithubService;
   todos?: TodoService;
   runs?: RunService;
   connections?: ConnectionService;
@@ -112,6 +117,8 @@ export interface ServiceAppOptions {
   documentWorkflow?: import("../documentWorkflow/documentWorkflowService.js").DocumentWorkflowService;
   zotero?: import("../zotero/zoteroConnector.js").ZoteroConnector;
   officeCli?: import("../officecli/officeCliRuntime.js").OfficeCliRuntime;
+  /** Task 05 / 05A: unified Provider API for PWA + pawb CLI. */
+  providers?: import("../providers/providerService.js").ProviderService;
 }
 
 const loopbackAddresses = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -199,7 +206,8 @@ export function createApp(options: ServiceAppOptions): Express {
         ...(options.plugins ? (["plugins"] as const) : []),
         ...(options.documentWorkflow ? (["document-workflow"] as const) : []),
         ...(options.zotero ? (["zotero"] as const) : []),
-        ...(options.officeCli ? (["officecli"] as const) : [])
+        ...(options.officeCli ? (["officecli"] as const) : []),
+        ...(options.providers ? (["providers", "pawb-cli"] as const) : [])
       ]
     });
   });
@@ -208,6 +216,13 @@ export function createApp(options: ServiceAppOptions): Express {
   if (options.connections) {
     mountConnectionRoutes(app, options.connections);
     mountProviderRoutes(app);
+  }
+  if (options.providers) {
+    mountProviderApiRoutes(app, options.providers);
+  }
+
+  if (options.github) {
+    mountGithubRoutes(app, options.github);
   }
 
   // Task 18: optional AI planning endpoint (does not mutate formal files).
@@ -484,6 +499,15 @@ export function createApp(options: ServiceAppOptions): Express {
     if (!options.runs) return response.status(503).json({ error: "Run service is not ready." });
     try {
       response.json(await options.runs.get(request.params.runId));
+    } catch (error) {
+      response.status(404).json({ error: error instanceof Error ? error.message : "Run was not found." });
+    }
+  });
+
+  app.get("/api/runs/:runId/usage", async (request, response) => {
+    if (!options.runs) return response.status(503).json({ error: "Run service is not ready." });
+    try {
+      response.json(await options.runs.getUsage(request.params.runId));
     } catch (error) {
       response.status(404).json({ error: error instanceof Error ? error.message : "Run was not found." });
     }

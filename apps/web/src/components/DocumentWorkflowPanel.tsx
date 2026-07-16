@@ -8,6 +8,22 @@ import {
   type ZoteroCollectionRecord,
   type ZoteroStatusRecord
 } from "../lib/documentWorkflow.js";
+import {
+  EmptyHint,
+  Field,
+  Grid2,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  SelectField,
+  Stack,
+  Tag,
+  TextAreaField,
+  TextInput
+} from "./ui.js";
 
 interface DocumentWorkflowPanelProps {
   serviceUrl: string;
@@ -112,31 +128,31 @@ export function DocumentWorkflowPanel({ serviceUrl, available }: DocumentWorkflo
   };
 
   return (
-    <section className="panel document-workflow-panel" aria-label="文档工作流">
-      <header>
-        <p className="eyebrow">DOCUMENT WORKFLOW</p>
-        <h3>报告 / 论文流水线（Zotero + OfficeCLI）</h3>
-        <p className="muted">
-          提纲批准 → 真实文献证据 → 分章撰写 → OfficeCLI DOCX → 审查 → Word/Zotero 终排版
-        </p>
-      </header>
-
-      <div className="status-row">
-        <span className={zotero?.running ? "chip ok" : "chip warn"}>
+    <Panel
+      eyebrow="DOCUMENT WORKFLOW"
+      title="报告 / 论文流水线（Zotero + OfficeCLI）"
+      description="提纲批准 → 真实文献证据 → 分章撰写 → OfficeCLI DOCX → 审查 → Word/Zotero 终排版"
+      actions={
+        <QuietButton isDisabled={!available || busy} onPress={() => void refresh()}>
+          刷新
+        </QuietButton>
+      }
+    >
+      <RowActions>
+        <Tag color={zotero?.running ? "success" : "warning"}>
           Zotero：{zotero?.running ? "在线" : zotero?.detail ?? "未知"}
-        </span>
-        <span className={office?.installed ? "chip ok" : "chip warn"}>
+        </Tag>
+        <Tag color={office?.installed ? "success" : "warning"}>
           OfficeCLI：{office?.installed ? `已安装 ${office.version ?? ""}` : office?.detail ?? "未知"}
-        </span>
-      </div>
+        </Tag>
+      </RowActions>
 
-      {!available && <p className="notice">服务离线时无法使用文档工作流。</p>}
-      {notice && <p className="notice" role="status">{notice}</p>}
+      {!available && <Notice tone="warning">服务离线时无法使用文档工作流。</Notice>}
+      {notice ? <Notice>{notice}</Notice> : null}
 
-      <div className="form-grid">
-        <label>
-          文档类型
-          <select
+      <Grid2>
+        <Field label="文档类型">
+          <SelectField
             aria-label="文档类型"
             value={documentType}
             onChange={(event) => setDocumentType(event.target.value as DocumentType)}
@@ -146,35 +162,31 @@ export function DocumentWorkflowPanel({ serviceUrl, available }: DocumentWorkflo
                 {label}
               </option>
             ))}
-          </select>
-        </label>
-        <label>
-          引用模式
-          <select
+          </SelectField>
+        </Field>
+        <Field label="引用模式">
+          <SelectField
             aria-label="引用模式"
             value={citationMode}
             onChange={(event) => setCitationMode(event.target.value as CitationMode)}
           >
             <option value="dynamic_zotero">动态引用（Word + Zotero 插件）</option>
             <option value="static">静态引用</option>
-          </select>
-        </label>
-        <label>
-          题目
-          <input aria-label="题目" value={title} onChange={(event) => setTitle(event.target.value)} />
-        </label>
-        <label>
-          工作区路径
-          <input
+          </SelectField>
+        </Field>
+        <Field label="题目">
+          <TextInput aria-label="题目" value={title} onChange={(event) => setTitle(event.target.value)} />
+        </Field>
+        <Field label="工作区路径">
+          <TextInput
             aria-label="工作区路径"
             placeholder="C:\\path\\to\\project"
             value={workspaceRoot}
             onChange={(event) => setWorkspaceRoot(event.target.value)}
           />
-        </label>
-        <label>
-          Zotero Collection
-          <select
+        </Field>
+        <Field label="Zotero Collection">
+          <SelectField
             aria-label="Zotero Collection"
             value={collectionKey}
             onChange={(event) => setCollectionKey(event.target.value)}
@@ -185,27 +197,28 @@ export function DocumentWorkflowPanel({ serviceUrl, available }: DocumentWorkflo
                 {col.name}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="full">
-          任务要求
-          <textarea aria-label="任务要求" rows={3} value={brief} onChange={(event) => setBrief(event.target.value)} />
-        </label>
-      </div>
+          </SelectField>
+        </Field>
+      </Grid2>
 
-      <div className="button-row">
-        <button type="button" disabled={!available || busy} onClick={() => void createJob()}>
+      <Field label="任务要求">
+        <TextAreaField
+          aria-label="任务要求"
+          rows={3}
+          value={brief}
+          onChange={(event) => setBrief(event.target.value)}
+        />
+      </Field>
+
+      <RowActions>
+        <PrimaryButton isDisabled={!available || busy} onPress={() => void createJob()}>
           创建文档任务
-        </button>
-        <button type="button" className="quiet-button" disabled={!available || busy} onClick={() => void refresh()}>
-          刷新
-        </button>
-      </div>
+        </PrimaryButton>
+      </RowActions>
 
       {jobs.length > 0 && (
-        <label>
-          当前任务
-          <select
+        <Field label="当前任务">
+          <SelectField
             aria-label="当前任务"
             value={selected?.jobId ?? ""}
             onChange={(event) => setSelectedId(event.target.value)}
@@ -215,49 +228,73 @@ export function DocumentWorkflowPanel({ serviceUrl, available }: DocumentWorkflo
                 {job.requirement.title} · {job.status}
               </option>
             ))}
-          </select>
-        </label>
+          </SelectField>
+        </Field>
       )}
 
       {selected && (
-        <div className="document-job-detail">
-          <p>
-            <strong>状态：</strong>
-            {selected.status}
-            {selected.requirement.citationMode === "dynamic_zotero" ? " · 动态引用" : " · 静态引用"}
-            {selected.dynamicCitationsPresent ? " · 已含动态字段保护" : ""}
-          </p>
+        <Stack>
+          <ListCard>
+            <p className="m-0 text-sm">
+              <strong>状态：</strong>
+              {selected.status}
+              {selected.requirement.citationMode === "dynamic_zotero" ? " · 动态引用" : " · 静态引用"}
+              {selected.dynamicCitationsPresent ? " · 已含动态字段保护" : ""}
+            </p>
+          </ListCard>
 
-          <div className="button-row wrap">
-            <button type="button" disabled={busy} onClick={() => void runStep("收集文献", () => client.gatherSources(selected.jobId))}>
+          <RowActions>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("收集文献", () => client.gatherSources(selected.jobId))}
+            >
               1. 收集 Zotero 文献
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("生成提纲", () => client.generateOutline(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("生成提纲", () => client.generateOutline(selected.jobId))}
+            >
               2. 生成提纲
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("批准提纲", () => client.approveOutline(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("批准提纲", () => client.approveOutline(selected.jobId))}
+            >
               3. 批准提纲
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("分章写作", () => client.writeSections(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("分章写作", () => client.writeSections(selected.jobId))}
+            >
               4. 分章写作
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("生成 DOCX", () => client.generateDocx(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("生成 DOCX", () => client.generateDocx(selected.jobId))}
+            >
               5. OfficeCLI 生成 DOCX
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("审查", () => client.runReviews(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("审查", () => client.runReviews(selected.jobId))}
+            >
               6. /no-mistakes 审查
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("引用定稿", () => client.finalizeCitations(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("引用定稿", () => client.finalizeCitations(selected.jobId))}
+            >
               7. 引用定稿
-            </button>
-            <button type="button" disabled={busy} onClick={() => void runStep("导出", () => client.exportFinal(selected.jobId))}>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() => void runStep("导出", () => client.exportFinal(selected.jobId))}
+            >
               8. 导出清单与报告
-            </button>
-            <button
-              type="button"
-              className="quiet-button"
-              disabled={busy}
-              onClick={() =>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() =>
                 void runStep("Word 交接", async () => {
                   const hint = await client.openWord(selected.jobId);
                   setNotice(hint.message);
@@ -266,12 +303,10 @@ export function DocumentWorkflowPanel({ serviceUrl, available }: DocumentWorkflo
               }
             >
               Word 打开提示
-            </button>
-            <button
-              type="button"
-              className="quiet-button"
-              disabled={busy}
-              onClick={() =>
+            </QuietButton>
+            <QuietButton
+              isDisabled={busy}
+              onPress={() =>
                 void runStep("检测变更", async () => {
                   const change = await client.fileChange(selected.jobId);
                   setNotice(change.changed ? "检测到 Word 保存变更" : "文件未变化");
@@ -283,52 +318,64 @@ export function DocumentWorkflowPanel({ serviceUrl, available }: DocumentWorkflo
               }
             >
               刷新文件状态
-            </button>
-          </div>
+            </QuietButton>
+          </RowActions>
 
-          <div className="two-col">
-            <div>
-              <h4>章节</h4>
-              <ul>
-                {selected.sections.map((section) => (
-                  <li key={section.id}>
-                    {section.order}. {section.title} · {section.status}
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div>
-              <h4>文献 / 证据</h4>
-              <ul>
-                {selected.sources.map((source) => (
-                  <li key={source.itemKey}>
-                    <code>{source.itemKey}</code> {source.title}
-                  </li>
-                ))}
-              </ul>
-              <h4>引用映射</h4>
-              <ul>
-                {selected.citationMap.entries.map((entry) => (
-                  <li key={entry.claimId}>
-                    {entry.claim} → {entry.sourceItems.join(", ")}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
+          <Grid2>
+            <Stack>
+              <h4 className="m-0 text-sm font-semibold">章节</h4>
+              {selected.sections.length === 0 ? (
+                <EmptyHint>暂无章节</EmptyHint>
+              ) : (
+                <ul className="m-0 list-none space-y-1 p-0 text-sm">
+                  {selected.sections.map((section) => (
+                    <li key={section.id}>
+                      {section.order}. {section.title} · {section.status}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Stack>
+            <Stack>
+              <h4 className="m-0 text-sm font-semibold">文献 / 证据</h4>
+              {selected.sources.length === 0 ? (
+                <EmptyHint>暂无文献</EmptyHint>
+              ) : (
+                <ul className="m-0 list-none space-y-1 p-0 text-sm">
+                  {selected.sources.map((source) => (
+                    <li key={source.itemKey}>
+                      <code>{source.itemKey}</code> {source.title}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <h4 className="m-0 text-sm font-semibold">引用映射</h4>
+              {selected.citationMap.entries.length === 0 ? (
+                <EmptyHint>暂无引用映射</EmptyHint>
+              ) : (
+                <ul className="m-0 list-none space-y-1 p-0 text-sm">
+                  {selected.citationMap.entries.map((entry) => (
+                    <li key={entry.claimId}>
+                      {entry.claim} → {entry.sourceItems.join(", ")}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Stack>
+          </Grid2>
 
           {selected.currentDocxPath && (
-            <p className="muted">
+            <EmptyHint>
               DOCX：<code>{selected.currentDocxPath}</code>
-            </p>
+            </EmptyHint>
           )}
           {selected.reviews[0] && (
-            <p>
+            <p className="m-0 text-sm">
               最近审查：{selected.reviews[selected.reviews.length - 1]?.summary}
             </p>
           )}
-        </div>
+        </Stack>
       )}
-    </section>
+    </Panel>
   );
 }

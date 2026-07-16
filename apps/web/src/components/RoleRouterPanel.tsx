@@ -5,6 +5,18 @@ import {
   type RouteDecisionInput,
   type RoutingDecisionRecord
 } from "../lib/routing.js";
+import {
+  EmptyHint,
+  Field,
+  Grid2,
+  ListCard,
+  Panel,
+  PrimaryButton,
+  SelectField,
+  Stack,
+  Tag,
+  TextInput
+} from "./ui.js";
 
 interface RoleRouterPanelProps {
   serviceUrl: string;
@@ -89,104 +101,116 @@ export function RoleRouterPanel({ serviceUrl, available, runId, onNotice }: Role
 
   if (!available) {
     return (
-      <section className="panel">
-        <h2>Firstmate 角色路由</h2>
-        <p className="muted">服务不可用，无法预览自动角色选择。</p>
-      </section>
+      <Panel title="Firstmate 角色路由">
+        <EmptyHint>服务不可用，无法预览自动角色选择。</EmptyHint>
+      </Panel>
     );
   }
 
   return (
-    <section className="panel">
-      <h2>Firstmate 角色路由</h2>
-      <p className="muted">
-        计划批准后按能力 / Harness / Skills / Tools / 权限 / 启用状态 / allowFirstmateAutoInvoke 自动匹配；
-        可在执行前覆盖；临时角色需确认后才进入长期库。
-      </p>
-
-      <div className="form-grid">
-        <label>
-          所需能力（逗号分隔）
-          <input value={capabilities} onChange={(event) => setCapabilities(event.target.value)} />
-        </label>
-        <label>
-          复杂度
-          <select value={complexity} onChange={(event) => setComplexity(event.target.value as typeof complexity)}>
+    <Panel
+      eyebrow="ROLE ROUTING"
+      title="Firstmate 角色路由"
+      description="计划批准后按能力 / Harness / Skills / Tools / 权限 / 启用状态 / allowFirstmateAutoInvoke 自动匹配；可在执行前覆盖；临时角色需确认后才进入长期库。"
+    >
+      <Grid2>
+        <Field label="所需能力（逗号分隔）">
+          <TextInput
+            value={capabilities}
+            onChange={(event) => setCapabilities(event.target.value)}
+          />
+        </Field>
+        <Field label="复杂度">
+          <SelectField
+            value={complexity}
+            onChange={(event) => setComplexity(event.target.value as typeof complexity)}
+          >
             <option value="low">简单（单角色）</option>
             <option value="medium">中等</option>
             <option value="high">复杂（可多实例）</option>
-          </select>
-        </label>
-        <label className="inline-check">
-          <input
-            type="checkbox"
-            checked={planApproved}
-            onChange={(event) => setPlanApproved(event.target.checked)}
-          />
-          计划已批准（可自动入队）
-        </label>
-        <button type="button" disabled={busy} onClick={() => void runRoute()}>
-          自动选择角色
-        </button>
-      </div>
+          </SelectField>
+        </Field>
+      </Grid2>
+      <label className="inline-flex items-center gap-2 text-sm text-foreground">
+        <input
+          type="checkbox"
+          checked={planApproved}
+          onChange={(event) => setPlanApproved(event.target.checked)}
+        />
+        计划已批准（可自动入队）
+      </label>
+      <PrimaryButton isDisabled={busy} onPress={() => void runRoute()}>
+        自动选择角色
+      </PrimaryButton>
 
-      {decision && (
-        <div className="stack" style={{ marginTop: "1rem" }}>
-          <p>
-            <strong>决策</strong> {decision.id.slice(0, 8)}…
+      {decision ? (
+        <Stack>
+          <div className="flex flex-wrap items-center gap-2">
+            <strong className="text-sm text-foreground">决策 {decision.id.slice(0, 8)}…</strong>
             {decision.canAutoQueue ? (
-              <span className="ok"> · 可直接入队</span>
+              <Tag color="success">可直接入队</Tag>
             ) : (
-              <span className="warn"> · {decision.autoQueueBlockedReason}</span>
+              <Tag color="warning">{decision.autoQueueBlockedReason ?? "不可自动入队"}</Tag>
             )}
-          </p>
-          <pre className="muted" style={{ whiteSpace: "pre-wrap" }}>{decision.explanation}</pre>
+          </div>
+          <pre className="m-0 whitespace-pre-wrap rounded-lg border border-border bg-field p-3 text-xs text-muted">
+            {decision.explanation}
+          </pre>
 
           {decision.instances.map((instance) => (
-            <article key={instance.instanceId} className="card">
-              <header>
-                <strong>{instance.instanceName}</strong>
-                <span className="muted"> · {instance.status}</span>
-              </header>
-              {instance.selection && (
-                <ul>
+            <ListCard
+              key={instance.instanceId}
+              actions={
+                <>
+                  <Tag color="default">{instance.status}</Tag>
+                  {instance.temporaryRole && !instance.temporaryRole.confirmedForLongTerm ? (
+                    <PrimaryButton
+                      size="sm"
+                      isDisabled={busy}
+                      onPress={() => void confirmTemporary(instance.temporaryRole!.id)}
+                    >
+                      确认保存为长期角色
+                    </PrimaryButton>
+                  ) : null}
+                </>
+              }
+            >
+              <strong className="block text-sm text-foreground">{instance.instanceName}</strong>
+              {instance.selection ? (
+                <ul className="m-0 list-none space-y-0.5 p-0 text-sm text-muted">
                   <li>角色：{instance.selection.name}</li>
                   <li>模型：{instance.selection.modelId ?? "默认"}</li>
                   <li>Harness：{instance.selection.harness}</li>
                   <li>来源：{instance.selection.source}</li>
                 </ul>
-              )}
-              <p>{instance.reason}</p>
-              {instance.temporaryRole && !instance.temporaryRole.confirmedForLongTerm && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void confirmTemporary(instance.temporaryRole!.id)}
-                >
-                  确认保存为长期角色
-                </button>
-              )}
-            </article>
+              ) : null}
+              <p className="m-0 text-sm text-muted">{instance.reason}</p>
+            </ListCard>
           ))}
 
-          <div className="form-grid">
-            <label>
-              执行前覆盖为
-              <select value={overrideRoleId} onChange={(event) => setOverrideRoleId(event.target.value)}>
+          <Grid2>
+            <Field label="执行前覆盖为">
+              <SelectField
+                value={overrideRoleId}
+                onChange={(event) => setOverrideRoleId(event.target.value)}
+              >
                 {roles.map((role) => (
                   <option key={role.id} value={role.id}>
-                    {role.name} ({role.harness}{role.modelId ? ` / ${role.modelId}` : ""})
+                    {role.name} ({role.harness}
+                    {role.modelId ? ` / ${role.modelId}` : ""})
                   </option>
                 ))}
-              </select>
-            </label>
-            <button type="button" disabled={busy || !overrideRoleId} onClick={() => void applyOverride()}>
-              应用用户覆盖
-            </button>
-          </div>
-        </div>
+              </SelectField>
+            </Field>
+          </Grid2>
+          <PrimaryButton isDisabled={busy || !overrideRoleId} onPress={() => void applyOverride()}>
+            应用用户覆盖
+          </PrimaryButton>
+        </Stack>
+      ) : (
+        <EmptyHint>运行「自动选择角色」后显示路由决策与实例。</EmptyHint>
       )}
-    </section>
+    </Panel>
   );
 }
 

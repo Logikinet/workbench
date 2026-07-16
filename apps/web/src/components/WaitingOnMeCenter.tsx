@@ -4,10 +4,13 @@ import {
   type WaitingItemKind
 } from "../lib/waitingOnMe.js";
 import type { WorkbenchRoute } from "../lib/workbenchRoutes.js";
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { createChatBridge } from "../lib/chatBridge.js";
+import { InboxIcon, TdsEmpty, TdsGhostButton, TdsPage, TdsPrimaryButton } from "./TdsPage.js";
 
 interface WaitingOnMeCenterProps {
   available: boolean;
+  serviceUrl: string;
   items: WaitingItem[];
   loading: boolean;
   error: string;
@@ -17,10 +20,10 @@ interface WaitingOnMeCenterProps {
 
 const filterKinds: Array<{ id: "all" | WaitingItemKind; label: string }> = [
   { id: "all", label: "全部" },
-  { id: "plan_approval", label: "计划审批" },
-  { id: "ask_user", label: "AskUser" },
+  { id: "plan_approval", label: "Plan ready" },
+  { id: "ask_user", label: "需要回答" },
   { id: "dangerous_action", label: "危险操作" },
-  { id: "acceptance", label: "最终验收" },
+  { id: "acceptance", label: "验收" },
   { id: "review_failed", label: "审查失败" },
   { id: "recovery", label: "中断恢复" }
 ];
@@ -30,74 +33,135 @@ export function WaitingOnMeCenter({
   loading,
   error,
   available,
+  serviceUrl,
   onRefresh,
   onNavigate
 }: WaitingOnMeCenterProps) {
+  const bridge = useMemo(() => createChatBridge(serviceUrl), [serviceUrl]);
   const [filter, setFilter] = useState<"all" | WaitingItemKind>("all");
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
   const visible = filter === "all" ? items : items.filter((item) => item.kind === filter);
 
-  return (
-    <section className="workspace-panel waiting-center" aria-labelledby="waiting-title">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">WAITING ON ME</p>
-          <h2 id="waiting-title">等待我处理</h2>
-          <p className="panel-lead">
-            集中处理计划审批、AskUser、危险操作确认与最终验收。移动端优先完成这些操作。
-          </p>
-        </div>
-        <button type="button" className="quiet-button" onClick={onRefresh} disabled={!available || loading}>
-          {loading ? "扫描中…" : "刷新"}
-        </button>
-      </div>
+  const planReady = items.filter((i) => i.kind === "plan_approval");
 
-      <div className="status-tabs waiting-filters" role="tablist" aria-label="等待事项类型">
-        {filterKinds.map((entry) => (
+  const confirmOne = async (item: WaitingItem) => {
+    if (!item.runId || busyId) return;
+    setBusyId(item.id);
+    try {
+      const result = await bridge.confirmToBuild(item.runId);
+      setNotice(result.notice);
+      onRefresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "确认失败");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const confirmAllPlans = async () => {
+    const ids = planReady.map((i) => i.runId).filter(Boolean);
+    if (!ids.length) return;
+    setBusyId("__all__");
+    try {
+      const result = await bridge.confirmMany(ids);
+      setNotice(`Run ${result.ok}${result.fail ? ` · 失败 ${result.fail}` : ""}`);
+      onRefresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "批量确认失败");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <TdsPage
+      kicker="Inbox"
+      title="Inbox"
+      description="Plan ready 时点「确认并构建」。其它事项点开处理。"
+      action={
+        <div className="tds-inline-actions">
+          {planReady.length > 0 ? (
+            <TdsPrimaryButton
+              onClick={() => void confirmAllPlans()}
+              disabled={!available || !!busyId}
+            >
+              Run {planReady.length}
+            </TdsPrimaryButton>
+          ) : null}
+          <TdsGhostButton onClick={onRefresh} disabled={!available || loading}>
+            {loading ? "扫描中…" : "刷新"}
+          </TdsGhostButton>
+        </div>
+      }
+    >
+      {error ? <div className="tds-banner err">{error}</div> : null}
+      {notice ? <div className="tds-banner ok">{notice}</div> : null}
+
+      <div className="tds-filter-row" role="tablist" aria-label="筛选类型">
+        {filterKinds.map((kind) => (
           <button
-            key={entry.id}
+            key={kind.id}
             type="button"
             role="tab"
-            aria-selected={filter === entry.id}
-            className={filter === entry.id ? "active-tab" : "quiet-button"}
-            onClick={() => setFilter(entry.id)}
+            aria-selected={filter === kind.id}
+            className={filter === kind.id ? "tds-filter-chip active" : "tds-filter-chip"}
+            onClick={() => setFilter(kind.id)}
           >
-            {entry.label}
-            {entry.id !== "all" && (
-              <span className="filter-count">{items.filter((item) => item.kind === entry.id).length}</span>
-            )}
+            {kind.label}
           </button>
         ))}
       </div>
 
-      {error && (
-        <p className="notice notice-error" role="alert">
-          {error}
-        </p>
-      )}
-
-      {visible.length === 0 ? (
-        <p className="muted-copy" role="status">
-          {loading ? "正在扫描 Runs…" : "没有匹配的待处理事项。"}
-        </p>
+      {!available ? (
+        <TdsEmpty title="服务离线" description="请打开 http://127.0.0.1:41731" />
+      ) : visible.length === 0 ? (
+        <TdsEmpty
+          icon={<InboxIcon />}
+          title="收件箱为空"
+          description="Agent 需要你确认计划或回答时会出现在这里。"
+          action={
+            <TdsPrimaryButton onClick={() => onNavigate({ section: "todos" })}>
+              前往 Todos
+            </TdsPrimaryButton>
+          }
+        />
       ) : (
-        <ul className="waiting-list">
+        <div className="tds-provider-list">
           {visible.map((item) => (
-            <li key={item.id} className={`waiting-card kind-${item.kind}`}>
-              <div>
-                <span className={`tag waiting-kind-${item.kind}`}>{waitingKindLabel(item.kind)}</span>
-                <strong>{item.title}</strong>
-                <small>{item.todoTitle}</small>
-                <span>{item.detail}</span>
+            <article key={item.id} className="tds-provider-row">
+              <div className="tds-provider-main">
+                <div className="tds-provider-title-row">
+                  <h3>{item.title}</h3>
+                  <span className="tds-chip warning">{waitingKindLabel(item.kind)}</span>
+                </div>
+                <p className="tds-muted">{item.detail || item.todoTitle || "—"}</p>
               </div>
-              <div className="project-actions">
-                <button type="button" onClick={() => onNavigate({ section: "todos", todoId: item.todoId })}>
-                  打开 Todo / Run
-                </button>
+              <div className="tds-provider-actions">
+                {item.kind === "plan_approval" && item.runId ? (
+                  <TdsPrimaryButton
+                    disabled={!!busyId}
+                    onClick={() => void confirmOne(item)}
+                  >
+                    {busyId === item.id ? "…" : "确认并构建"}
+                  </TdsPrimaryButton>
+                ) : null}
+                <TdsGhostButton
+                  onClick={() =>
+                    onNavigate(
+                      item.todoId
+                        ? { section: "todos", todoId: item.todoId }
+                        : { section: "waiting" }
+                    )
+                  }
+                >
+                  打开
+                </TdsGhostButton>
               </div>
-            </li>
+            </article>
           ))}
-        </ul>
+        </div>
       )}
-    </section>
+    </TdsPage>
   );
 }

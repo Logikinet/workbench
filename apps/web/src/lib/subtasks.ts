@@ -25,9 +25,12 @@ export interface SubtaskRecord {
   status: SubtaskStatus;
   agentInstance?: {
     roleId?: string;
+    temporaryRoleId?: string;
     name: string;
     harness?: "api" | "codex-cli";
     modelId?: string;
+    connectionId?: string;
+    source?: "role" | "temporary" | "user_specified" | "user_override" | "unassigned";
   };
   startedAt?: string;
   completedAt?: string;

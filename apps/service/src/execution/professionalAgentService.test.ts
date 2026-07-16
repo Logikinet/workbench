@@ -445,6 +445,18 @@ describe("API Professional Agent execution contract", () => {
 
   it("fail-closes code tasks on the API Professional Agent so main-workspace writes never happen", async () => {
     const role = await apiRole();
+    // When a Codex role exists, code tasks must not run via API on main workspace.
+    await roles.create({
+      name: "Codex 隔离执行",
+      responsibility: "在 worktree 中改代码",
+      systemInstruction: "仅使用 Codex CLI。",
+      harness: "codex-cli",
+      reasoningEffort: "medium",
+      skills: ["implement"],
+      tools: ["filesystem"],
+      permissions: { workspace: "project_only", network: false, shell: true, externalSend: false },
+      allowFirstmateAutoInvoke: true
+    });
     const isolated = new ProfessionalAgentService({ projects, todos, runs, roles, connections });
     const run = await runs.create(todoId, "实现一个新功能并修复相关回归。");
     await runs.decidePlan(run.id, { decision: "approved", summary: "批准代码任务。" });

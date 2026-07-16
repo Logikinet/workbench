@@ -1,3 +1,12 @@
+export interface ProjectGithubRecord {
+  accountId: string;
+  fullName: string;
+  htmlUrl: string;
+  private?: boolean;
+  defaultBranch?: string;
+  cloneUrl?: string;
+}
+
 export interface ProjectRecord {
   id: string;
   name: string;
@@ -6,6 +15,8 @@ export interface ProjectRecord {
   status: "active" | "archived";
   workspaceLinkStatus?: "linked" | "needs_repair";
   workspaceRepairNote?: string;
+  /** todos-style GitHub binding */
+  github?: ProjectGithubRecord;
 }
 
 export interface CreateProjectPayload {

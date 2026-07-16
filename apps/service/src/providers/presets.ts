@@ -43,7 +43,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     supportsModelList: true,
     supportsUsage: false,
     authStyle: "bearer",
-    requiresCredential: true,
+    // Allow create without key (configure later) — matches todos CLI custom flow.
+    requiresCredential: false,
     description: "任意 OpenAI 兼容中转站、官方 API 或本地网关。完全由用户填写 Base URL。"
   },
   {

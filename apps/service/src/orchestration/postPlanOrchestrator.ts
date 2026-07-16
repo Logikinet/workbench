@@ -18,6 +18,14 @@ export interface PostPlanOrchestratorDeps {
   prepareContinuedExecution?: (runId: string, summary: string) => Promise<unknown>;
   /** Optional log helper. */
   recordLog?: (runId: string, input: { level: "info" | "warn" | "error"; message: string }) => Promise<unknown>;
+  /**
+   * When a subtask has no roleId, pick a default executor so multi-agent plans still run.
+   * Prefer API roles with connection; Codex for code tasks.
+   */
+  resolveDefaultRole?: (input: {
+    harness: "api" | "codex-cli";
+    taskType?: string;
+  }) => Promise<{ roleId: string; name: string; harness: "api" | "codex-cli" } | undefined>;
 }
 
 export interface PostPlanOrchestrationResult {
@@ -250,9 +258,24 @@ async function startAgentsForRunning(
         result.errors.push(`Subtask ${subtaskId} missing after schedule.`);
         continue;
       }
-      const harness =
+      let harness =
         subtask.agentInstance?.harness ?? inferHarness(subtask.requiredCapabilities, taskType);
-      const roleId = subtask.agentInstance?.roleId;
+      let roleId = subtask.agentInstance?.roleId;
+
+      // Resolve a real Role when routing left the node unassigned.
+      if (!roleId && deps.resolveDefaultRole) {
+        const fallback = await deps.resolveDefaultRole({ harness, taskType });
+        if (fallback) {
+          roleId = fallback.roleId;
+          harness = fallback.harness;
+          subtask.agentInstance = {
+            roleId: fallback.roleId,
+            name: fallback.name,
+            harness: fallback.harness,
+            source: "role"
+          };
+        }
+      }
 
       if (harness === "codex-cli") {
         if (!deps.codexCli) {
@@ -266,7 +289,26 @@ async function startAgentsForRunning(
           result.errors.push(`Subtask ${subtaskId}: Professional Agent service unavailable.`);
           continue;
         }
-        const input: StartProfessionalAgentInput = roleId ? { roleId } : {};
+        const input: StartProfessionalAgentInput = roleId
+          ? { roleId }
+          : subtask.agentInstance?.connectionId
+            ? {
+                temporaryAgent: {
+                  name: subtask.agentInstance.name || `执行 · ${subtask.title}`,
+                  connectionId: subtask.agentInstance.connectionId,
+                  modelId: subtask.agentInstance.modelId,
+                  responsibility: subtask.title,
+                  systemInstruction: `你负责子任务：${subtask.title}。仅在批准计划与项目工作区内完成，并回报可验证结果。`,
+                  tools: subtask.agentInstance.tools ?? ["filesystem"]
+                }
+              }
+            : {};
+        if (!input.roleId && !input.temporaryAgent) {
+          result.errors.push(
+            `Subtask ${subtaskId}: 没有可分配的执行角色，请到 Agents 配置并绑定模型连接。`
+          );
+          continue;
+        }
         await deps.professionalAgents.start(runId, input);
         result.startedAgents.push({ subtaskId, harness: "api", roleId });
       }
@@ -307,11 +349,12 @@ function inferHarness(
   taskType?: string
 ): "api" | "codex-cli" {
   const caps = (capabilities ?? []).map((c) => c.toLowerCase());
+  // Prefer codex for code-shaped work only when capabilities explicitly request it.
+  // Default to API so local installs without Codex CLI still execute (not a dead shell).
   if (
-    taskType === "implementation" ||
-    taskType === "bug_fix" ||
-    taskType === "automation" ||
-    caps.some((c) => c.includes("codex") || c === "implement" || c.includes("code") || c === "codex-cli")
+    caps.some((c) => c.includes("codex") || c === "codex-cli") ||
+    ((taskType === "implementation" || taskType === "bug_fix" || taskType === "automation") &&
+      caps.some((c) => c === "implement" || c.includes("code")))
   ) {
     return "codex-cli";
   }

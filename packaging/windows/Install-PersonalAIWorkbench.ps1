@@ -111,6 +111,28 @@ try {
     Copy-Tree -Source (Join-Path $RepoRoot "apps\tray\dist") -Destination (Join-Path $resolvedInstall "tray\dist")
     Copy-Item -Path (Join-Path $RepoRoot "apps\tray\package.json") -Destination (Join-Path $resolvedInstall "tray\package.json") -Force
 
+    # pawb CLI (Provider management) — same localhost Agent Service as PWA
+    $cliDist = Join-Path $RepoRoot "apps\cli\dist"
+    if (Test-Path -LiteralPath $cliDist) {
+      Copy-Tree -Source $cliDist -Destination (Join-Path $resolvedInstall "cli\dist")
+      Copy-Item -Path (Join-Path $RepoRoot "apps\cli\package.json") -Destination (Join-Path $resolvedInstall "cli\package.json") -Force
+      $pawbCmd = @"
+@echo off
+set PAW_SERVICE_PORT=$Port
+"$nodePath" "$resolvedInstall\cli\dist\main.js" %*
+"@
+      Set-Content -Path (Join-Path $resolvedInstall "pawb.cmd") -Value $pawbCmd -Encoding ASCII
+      # User-local PATH shim so PowerShell / CMD / Windows Terminal can run `pawb`
+      $shimDir = Join-Path $env:LOCALAPPDATA "PersonalAIWorkbench\bin"
+      New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+      Copy-Item -Path (Join-Path $resolvedInstall "pawb.cmd") -Destination (Join-Path $shimDir "pawb.cmd") -Force
+      $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+      if ($userPath -notlike "*$shimDir*") {
+        [Environment]::SetEnvironmentVariable("Path", ($userPath.TrimEnd(";") + ";" + $shimDir), "User")
+        Write-Host "  Registered pawb on user PATH: $shimDir"
+      }
+    }
+
     # Deploy NotifyIcon tray host so Start Menu "Tray" is a real system-tray UI (not one-shot CLI).
     $packagingDir = Join-Path $RepoRoot "packaging\windows"
     foreach ($scriptName in @("TrayHost.ps1", "paths.ps1")) {

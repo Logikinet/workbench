@@ -1,5 +1,19 @@
 import { useState } from "react";
 import { createSubtaskClient, type SubtaskDagRecord } from "../lib/subtasks.js";
+import {
+  EmptyHint,
+  Field,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  Stack,
+  Tag,
+  TextAreaField,
+  TextInput
+} from "./ui.js";
 
 interface SubtaskDagPanelProps {
   serviceUrl: string;
@@ -32,7 +46,10 @@ export function SubtaskDagPanel({ serviceUrl, available, runId, onNotice }: Subt
         planVersion: 1,
         planApproved: true,
         autoSchedule: true,
-        steps: steps.split("\n").map((line) => line.trim()).filter(Boolean)
+        steps: steps
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
       });
       setDag(next);
       notify(`子任务 DAG 已创建，前沿 ${next.frontier.length} 项，自动调度中。`);
@@ -104,84 +121,88 @@ export function SubtaskDagPanel({ serviceUrl, available, runId, onNotice }: Subt
 
   if (!available) {
     return (
-      <section className="panel">
-        <h2>子任务依赖图</h2>
-        <p className="muted">服务不可用或未启用 subtask-dag 能力。</p>
-      </section>
+      <Panel title="子任务依赖图">
+        <EmptyHint>服务不可用或未启用 subtask-dag 能力。</EmptyHint>
+      </Panel>
     );
   }
 
   return (
-    <section className="panel">
-      <h2>子任务依赖图</h2>
-      <p className="muted">
-        计划批准后 Firstmate 按依赖连续调度；写任务串行，只读 / 独立 Worktree 可受控并行。
-        失败阻止下游；重大纠偏触发 AskReplan；支持检查点恢复。
-      </p>
+    <Panel
+      eyebrow="SUBTASK DAG"
+      title="子任务依赖图"
+      description="计划批准后 Firstmate 按依赖连续调度；写任务串行，只读 / 独立 Worktree 可受控并行。失败阻止下游；重大纠偏触发 AskReplan；支持检查点恢复。"
+    >
+      <Stack>
+        <Field label="Run ID">
+          <TextInput value={localRunId} onChange={(event) => setLocalRunId(event.target.value)} />
+        </Field>
+        <Field label="计划步骤（每行一步）">
+          <TextAreaField rows={4} value={steps} onChange={(event) => setSteps(event.target.value)} />
+        </Field>
+      </Stack>
 
-      <div className="form-grid">
-        <label>
-          Run ID
-          <input value={localRunId} onChange={(event) => setLocalRunId(event.target.value)} />
-        </label>
-        <label>
-          计划步骤（每行一步）
-          <textarea rows={4} value={steps} onChange={(event) => setSteps(event.target.value)} />
-        </label>
-      </div>
+      <RowActions>
+        <PrimaryButton isDisabled={busy} onPress={() => void createDag()}>
+          从计划创建并自动调度
+        </PrimaryButton>
+        <QuietButton isDisabled={busy} onPress={() => void refresh()}>
+          刷新
+        </QuietButton>
+        <QuietButton isDisabled={busy || !dag} onPress={() => void completeRunning()}>
+          完成当前运行项
+        </QuietButton>
+        <QuietButton isDisabled={busy} onPress={() => void resume()}>
+          从前沿恢复
+        </QuietButton>
+      </RowActions>
 
-      <div className="button-row">
-        <button type="button" disabled={busy} onClick={() => void createDag()}>从计划创建并自动调度</button>
-        <button type="button" disabled={busy} onClick={() => void refresh()}>刷新</button>
-        <button type="button" disabled={busy || !dag} onClick={() => void completeRunning()}>完成当前运行项</button>
-        <button type="button" disabled={busy} onClick={() => void resume()}>从前沿恢复</button>
-      </div>
-
-      <div className="form-grid">
-        <label>
-          纠偏说明（重大 → AskReplan）
-          <input value={correction} onChange={(event) => setCorrection(event.target.value)} />
-        </label>
-        <button type="button" disabled={busy || !dag} onClick={() => void applyMajorCorrection()}>
-          提交重大纠偏
-        </button>
-      </div>
-
-      {dag && (
-        <div className="subtask-dag">
-          <p>
-            状态 <strong>{dag.status}</strong>
-            {" · "}
-            前沿 {dag.frontier.length}
-            {" · "}
-            自动调度 {dag.autoSchedule ? "开" : "关"}
-            {dag.needsAskReplan ? " · 等待 AskReplan" : ""}
-          </p>
-          <ul className="subtask-list">
-            {dag.subtasks.map((sub) => (
-              <li key={sub.id} className={`subtask-item status-${sub.status}`}>
-                <div>
-                  <strong>{sub.title}</strong>
-                  <span className="muted"> · {sub.status} · {sub.accessMode}</span>
-                </div>
-                <div className="muted">
-                  依赖: {sub.dependsOn.length ? sub.dependsOn.join(", ") : "无"}
-                  {sub.agentInstance ? ` · 代理: ${sub.agentInstance.name}${sub.agentInstance.modelId ? ` / ${sub.agentInstance.modelId}` : ""}` : ""}
-                </div>
-                <div className="muted">
-                  {sub.startedAt ? `开始 ${sub.startedAt}` : "未开始"}
-                  {sub.completedAt ? ` · 结束 ${sub.completedAt}` : ""}
-                </div>
-                {sub.artifacts.length > 0 && (
-                  <div className="muted">产物: {sub.artifacts.join(", ")}</div>
-                )}
-                {sub.error && <div className="error">错误: {sub.error}</div>}
-                {sub.blockedReason && <div className="muted">阻塞: {sub.blockedReason}</div>}
-              </li>
-            ))}
-          </ul>
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="min-w-0 flex-1">
+          <Field label="纠偏说明（重大 → AskReplan）">
+            <TextInput value={correction} onChange={(event) => setCorrection(event.target.value)} />
+          </Field>
         </div>
-      )}
-    </section>
+        <QuietButton isDisabled={busy || !dag} onPress={() => void applyMajorCorrection()}>
+          提交重大纠偏
+        </QuietButton>
+      </div>
+
+      {dag ? (
+        <Stack>
+          <div className="flex flex-wrap items-center gap-2">
+            <Tag color="accent">{dag.status}</Tag>
+            <EmptyHint>
+              前沿 {dag.frontier.length} · 自动调度 {dag.autoSchedule ? "开" : "关"}
+              {dag.needsAskReplan ? " · 等待 AskReplan" : ""}
+            </EmptyHint>
+          </div>
+          {dag.subtasks.map((sub) => (
+            <ListCard key={sub.id}>
+              <div className="flex flex-wrap items-center gap-2">
+                <strong>{sub.title}</strong>
+                <Tag>{sub.status}</Tag>
+                <Tag color="default">{sub.accessMode}</Tag>
+              </div>
+              <EmptyHint>
+                依赖: {sub.dependsOn.length ? sub.dependsOn.join(", ") : "无"}
+                {sub.agentInstance
+                  ? ` · 代理: ${sub.agentInstance.name}${sub.agentInstance.modelId ? ` / ${sub.agentInstance.modelId}` : ""}`
+                  : ""}
+              </EmptyHint>
+              <EmptyHint>
+                {sub.startedAt ? `开始 ${sub.startedAt}` : "未开始"}
+                {sub.completedAt ? ` · 结束 ${sub.completedAt}` : ""}
+              </EmptyHint>
+              {sub.artifacts.length > 0 ? (
+                <EmptyHint>产物: {sub.artifacts.join(", ")}</EmptyHint>
+              ) : null}
+              {sub.error ? <Notice tone="danger">错误: {sub.error}</Notice> : null}
+              {sub.blockedReason ? <EmptyHint>阻塞: {sub.blockedReason}</EmptyHint> : null}
+            </ListCard>
+          ))}
+        </Stack>
+      ) : null}
+    </Panel>
   );
 }

@@ -4,6 +4,22 @@ import {
   type McpConnectionRecord,
   type McpToolDescriptor
 } from "../lib/mcp.js";
+import {
+  EmptyHint,
+  Field,
+  FormBlock,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  DangerButton,
+  SelectField,
+  Stack,
+  Tag,
+  TextAreaField,
+  TextInput
+} from "./ui.js";
 
 interface McpPanelProps {
   serviceUrl: string;
@@ -129,26 +145,28 @@ export function McpPanel({ serviceUrl, available, dataEpoch = 0 }: McpPanelProps
   };
 
   return (
-    <section className="panel" aria-labelledby="mcp-title">
-      <header className="panel-header">
-        <h2 id="mcp-title">MCP 连接</h2>
-        <p>配置本地/远程 MCP Server，按工具绑定到 Agent Role；密钥不进入普通备份。</p>
-      </header>
+    <Panel
+      eyebrow="MCP"
+      title="MCP 服务器"
+      description="Local stdio / remote HTTP MCP 服务器 bound to agent roles. Secrets stay out of plain backups."
+      actions={
+        <QuietButton isDisabled={!available} onPress={() => void reload()}>
+          刷新
+        </QuietButton>
+      }
+    >
+      {!available && <Notice tone="warning">服务离线时无法管理 MCP 连接。</Notice>}
 
-      {!available && <p className="muted">服务离线时无法管理 MCP 连接。</p>}
-
-      <form className="stack" onSubmit={saveNew}>
-        <label>
-          名称
-          <input
+      <FormBlock onSubmit={saveNew}>
+        <Field label="名称">
+          <TextInput
             value={draft.name}
             onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
             placeholder="例如：filesystem-mcp"
           />
-        </label>
-        <label>
-          传输
-          <select
+        </Field>
+        <Field label="传输">
+          <SelectField
             value={draft.transport}
             onChange={(event) =>
               setDraft((current) => ({
@@ -159,156 +177,165 @@ export function McpPanel({ serviceUrl, available, dataEpoch = 0 }: McpPanelProps
           >
             <option value="stdio">stdio（本地进程）</option>
             <option value="http">http（远程）</option>
-          </select>
-        </label>
+          </SelectField>
+        </Field>
         {draft.transport === "stdio" ? (
           <>
-            <label>
-              命令
-              <input
+            <Field label="命令">
+              <TextInput
                 value={draft.command}
                 onChange={(event) => setDraft((current) => ({ ...current, command: event.target.value }))}
                 placeholder="npx"
                 required
               />
-            </label>
-            <label>
-              参数
-              <input
+            </Field>
+            <Field label="参数">
+              <TextInput
                 value={draft.args}
                 onChange={(event) => setDraft((current) => ({ ...current, args: event.target.value }))}
                 placeholder="-y @modelcontextprotocol/server-filesystem ."
               />
-            </label>
-            <label>
-              环境变量（KEY=value，每行一条；仅写入凭据库）
-              <textarea
+            </Field>
+            <Field label="环境变量（KEY=value，每行一条；仅写入凭据库）">
+              <TextAreaField
                 value={draft.envText}
                 onChange={(event) => setDraft((current) => ({ ...current, envText: event.target.value }))}
                 rows={3}
                 placeholder={"API_KEY=\nOTHER="}
               />
-            </label>
+            </Field>
           </>
         ) : (
           <>
-            <label>
-              URL
-              <input
+            <Field label="URL">
+              <TextInput
                 value={draft.url}
                 onChange={(event) => setDraft((current) => ({ ...current, url: event.target.value }))}
                 placeholder="https://127.0.0.1:3100/mcp"
                 required
               />
-            </label>
-            <label>
-              Auth Token（可选，不回显）
-              <input
+            </Field>
+            <Field label="Auth Token（可选，不回显）">
+              <TextInput
                 type="password"
                 value={draft.authToken}
                 onChange={(event) => setDraft((current) => ({ ...current, authToken: event.target.value }))}
-                autoComplete="off"
               />
-            </label>
+            </Field>
           </>
         )}
-        <button type="submit" disabled={!available}>
+        <PrimaryButton type="submit" isDisabled={!available}>
           添加 MCP 连接
-        </button>
-      </form>
+        </PrimaryButton>
+      </FormBlock>
 
-      {notice && <p className="notice">{notice}</p>}
+      {notice ? <Notice>{notice}</Notice> : null}
 
-      <ul className="list">
-        {connections.map((connection) => (
-          <li key={connection.id} className="list-item">
-            <div>
-              <strong>{connection.name}</strong>
-              <span className="muted">
-                {" "}
-                · {connection.transport}
-                {connection.enabled ? "" : " · 已停用"}
-                {connection.credentialPresent ? " · 凭据已保存" : ""}
-              </span>
+      <Stack>
+        {connections.length === 0 ? (
+          <EmptyHint>暂无 MCP 连接。</EmptyHint>
+        ) : (
+          connections.map((connection) => (
+            <ListCard
+              key={connection.id}
+              actions={
+                <>
+                  <QuietButton
+                    isDisabled={!available}
+                    onPress={() => void testConnection(connection.id)}
+                  >
+                    测试并发现工具
+                  </QuietButton>
+                  <QuietButton
+                    isDisabled={!available}
+                    onPress={() =>
+                      void client
+                        .update(connection.id, { enabled: !connection.enabled })
+                        .then(reload)
+                        .catch((error: unknown) =>
+                          setNotice(error instanceof Error ? error.message : "更新失败")
+                        )
+                    }
+                  >
+                    {connection.enabled ? "停用" : "启用"}
+                  </QuietButton>
+                  <DangerButton
+                    isDisabled={!available}
+                    onPress={() =>
+                      void client
+                        .remove(connection.id)
+                        .then(reload)
+                        .catch((error: unknown) =>
+                          setNotice(error instanceof Error ? error.message : "删除失败")
+                        )
+                    }
+                  >
+                    删除
+                  </DangerButton>
+                </>
+              }
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <strong>{connection.name}</strong>
+                <Tag color={connection.enabled ? "success" : "default"}>
+                  {connection.transport}
+                  {connection.enabled ? "" : " · 已停用"}
+                </Tag>
+                {connection.credentialPresent ? <Tag color="accent">凭据已保存</Tag> : null}
+              </div>
               {connection.lastTest && (
-                <p className="muted">
+                <p className="m-0 text-sm text-muted">
                   最近测试：{connection.lastTest.kind} — {connection.lastTest.message}
                 </p>
               )}
               {connection.envKeys && connection.envKeys.length > 0 && (
-                <p className="muted">环境变量键：{connection.envKeys.join(", ")}（值不展示）</p>
+                <p className="m-0 text-sm text-muted">
+                  环境变量键：{connection.envKeys.join(", ")}（值不展示）
+                </p>
               )}
-            </div>
-            <div className="row-actions">
-              <button type="button" onClick={() => void testConnection(connection.id)} disabled={!available}>
-                测试并发现工具
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  void client
-                    .update(connection.id, { enabled: !connection.enabled })
-                    .then(reload)
-                    .catch((error: unknown) =>
-                      setNotice(error instanceof Error ? error.message : "更新失败")
-                    )
-                }
-                disabled={!available}
-              >
-                {connection.enabled ? "停用" : "启用"}
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  void client
-                    .remove(connection.id)
-                    .then(reload)
-                    .catch((error: unknown) =>
-                      setNotice(error instanceof Error ? error.message : "删除失败")
-                    )
-                }
-                disabled={!available}
-              >
-                删除
-              </button>
-            </div>
-            {(toolsById[connection.id] ?? connection.tools ?? []).length > 0 && (
-              <div className="stack">
-                <p>可选工具（勾选后绑定到 Role，默认不暴露整个 Server）：</p>
-                <ul>
-                  {(toolsById[connection.id] ?? connection.tools ?? []).map((tool) => {
-                    const key = `${connection.id}::${tool.name}`;
-                    return (
-                      <li key={key}>
-                        <label>
-                          <input
-                            type="checkbox"
-                            checked={selectedTools.includes(key)}
-                            onChange={() => toggleTool(connection.id, tool.name)}
-                          />{" "}
-                          <code>{tool.name}</code>
-                          {tool.description ? ` — ${tool.description}` : ""}
-                          {tool.risk ? ` [${tool.risk}]` : ""}
-                        </label>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-          </li>
-        ))}
-      </ul>
+              {(toolsById[connection.id] ?? connection.tools ?? []).length > 0 && (
+                <Stack className="mt-2">
+                  <p className="m-0 text-sm">可选工具（勾选后绑定到 Role，默认不暴露整个 Server）：</p>
+                  <ul className="m-0 list-none space-y-1 p-0 text-sm">
+                    {(toolsById[connection.id] ?? connection.tools ?? []).map((tool) => {
+                      const key = `${connection.id}::${tool.name}`;
+                      return (
+                        <li key={key}>
+                          <label className="inline-flex items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={selectedTools.includes(key)}
+                              onChange={() => toggleTool(connection.id, tool.name)}
+                            />
+                            <span>
+                              <code>{tool.name}</code>
+                              {tool.description ? ` — ${tool.description}` : ""}
+                              {tool.risk ? ` [${tool.risk}]` : ""}
+                            </span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </Stack>
+              )}
+            </ListCard>
+          ))
+        )}
+      </Stack>
 
-      <div className="stack">
-        <label>
-          绑定到 Agent Role ID
-          <input value={roleId} onChange={(event) => setRoleId(event.target.value)} placeholder="role uuid" />
-        </label>
-        <button type="button" onClick={() => void saveRoleBindings()} disabled={!available}>
+      <Stack>
+        <Field label="绑定到 Agent Role ID">
+          <TextInput
+            value={roleId}
+            onChange={(event) => setRoleId(event.target.value)}
+            placeholder="role uuid"
+          />
+        </Field>
+        <PrimaryButton isDisabled={!available} onPress={() => void saveRoleBindings()}>
           保存工具绑定（{selectedTools.length}）
-        </button>
-      </div>
-    </section>
+        </PrimaryButton>
+      </Stack>
+    </Panel>
   );
 }

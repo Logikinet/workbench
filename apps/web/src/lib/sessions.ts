@@ -180,6 +180,8 @@ export function createSessionClient(serviceUrl: string) {
         agentName?: string | null;
         projectId?: string | null;
         status?: SessionStatus;
+        todoId?: string | null;
+        runId?: string | null;
       }
     ) {
       return requestJson<AgentSessionRecord>(`/api/sessions/${encodeURIComponent(sessionId)}`, {

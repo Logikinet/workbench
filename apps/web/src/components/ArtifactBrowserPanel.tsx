@@ -5,6 +5,19 @@ import {
   type BrowserEntry,
   type PreviewResult
 } from "../lib/artifacts.js";
+import {
+  EmptyHint,
+  Field,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  Stack,
+  Tag,
+  TextInput
+} from "./ui.js";
 
 interface ArtifactBrowserPanelProps {
   serviceUrl: string;
@@ -86,9 +99,12 @@ export function ArtifactBrowserPanel({
 
   useEffect(() => {
     if (!available) return;
-    void client.officeStatus().then((s) => {
-      setOfficeDetail(s.detail || `Office=${s.office ? "yes" : "no"} WPS=${s.wps ? "yes" : "no"}`);
-    }).catch(() => setOfficeDetail(""));
+    void client
+      .officeStatus()
+      .then((s) => {
+        setOfficeDetail(s.detail || `Office=${s.office ? "yes" : "no"} WPS=${s.wps ? "yes" : "no"}`);
+      })
+      .catch(() => setOfficeDetail(""));
     void reloadCatalog();
     if (activeProject) void reloadBrowse("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -220,194 +236,188 @@ export function ArtifactBrowserPanel({
 
   if (!available) {
     return (
-      <section className="workspace-panel artifact-browser-panel">
-        <div className="section-heading">
-          <h2>Artifact 文档浏览器</h2>
-        </div>
-        <p className="muted">服务未提供 artifacts 能力，或尚未挂载路由。</p>
-      </section>
+      <Panel title="Artifact 文档浏览器">
+        <EmptyHint>服务未提供 artifacts 能力，或尚未挂载路由。</EmptyHint>
+      </Panel>
     );
   }
 
   return (
-    <section className="workspace-panel artifact-browser-panel">
-      <div className="section-heading">
-        <h2>Artifact 文档浏览器</h2>
-        <button type="button" className="quiet-button" disabled={busy} onClick={() => void reloadBrowse()}>
+    <Panel
+      eyebrow="ARTIFACTS"
+      title="Artifact 文档浏览器"
+      description={`安全浏览 Project 授权目录 · 本地文件为真源 · 预览不改写格式${officeDetail ? ` · ${officeDetail}` : ""}`}
+      actions={
+        <QuietButton isDisabled={busy} onPress={() => void reloadBrowse()}>
           刷新
-        </button>
+        </QuietButton>
+      }
+    >
+      <div className="grid gap-3 sm:grid-cols-3">
+        <Field label="Project ID">
+          <TextInput
+            value={projectInput}
+            onChange={(e) => setProjectInput(e.target.value)}
+            placeholder="project id"
+          />
+        </Field>
+        <Field label="Run ID">
+          <TextInput
+            value={runInput}
+            onChange={(e) => setRunInput(e.target.value)}
+            placeholder="optional run"
+          />
+        </Field>
+        <Field label="搜索目录">
+          <TextInput value={q} onChange={(e) => setQ(e.target.value)} placeholder="title / path" />
+        </Field>
       </div>
-      <p className="muted">
-        安全浏览 Project 授权目录 · 本地文件为真源 · 预览不改写格式
-        {officeDetail ? ` · ${officeDetail}` : ""}
-      </p>
 
-      <div className="artifact-toolbar">
-        <label>
-          Project ID
-          <input value={projectInput} onChange={(e) => setProjectInput(e.target.value)} placeholder="project id" />
-        </label>
-        <label>
-          Run ID
-          <input value={runInput} onChange={(e) => setRunInput(e.target.value)} placeholder="optional run" />
-        </label>
-        <label>
-          搜索目录
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="title / path" />
-        </label>
-        <button type="button" className="quiet-button" disabled={busy} onClick={() => void reloadCatalog()}>
+      <RowActions>
+        <QuietButton isDisabled={busy} onPress={() => void reloadCatalog()}>
           筛选目录
-        </button>
-        <button type="button" className="quiet-button" disabled={busy || !runInput.trim()} onClick={() => void importRun()}>
+        </QuietButton>
+        <QuietButton isDisabled={busy || !runInput.trim()} onPress={() => void importRun()}>
           导入 Run
-        </button>
-      </div>
+        </QuietButton>
+      </RowActions>
 
-      {notice && <p className="notice">{notice}</p>}
+      <Notice>{notice}</Notice>
 
-      <div className="artifact-layout">
-        <div className="artifact-tree">
-          <div className="artifact-path-bar">
-            <strong>/{cwd || ""}</strong>
-            <button type="button" className="quiet-button" disabled={parentPath === null || busy} onClick={() => void goUp()}>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1fr)]">
+        <Stack>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <strong className="text-sm">/{cwd || ""}</strong>
+            <QuietButton isDisabled={parentPath === null || busy} onPress={() => void goUp()}>
               上级
-            </button>
+            </QuietButton>
           </div>
-          <ul className="artifact-entry-list">
-            {entries.map((entry) => (
-              <li key={entry.relativePath}>
-                <button
-                  type="button"
-                  className={selectedPath === entry.relativePath ? "active" : ""}
-                  onClick={() => void openEntry(entry)}
-                >
-                  <span className="tag">{entry.kind === "directory" ? "dir" : entry.previewKind}</span>
-                  <strong>{entry.name}</strong>
-                  {entry.kind === "file" && (
-                    <small>
-                      {formatBytes(entry.sizeBytes)}
-                      {entry.large ? " · large" : ""}
-                    </small>
-                  )}
-                </button>
-              </li>
-            ))}
-            {entries.length === 0 && <li className="muted">空目录或未加载</li>}
-          </ul>
-        </div>
+          {entries.map((entry) => (
+            <ListCard
+              key={entry.relativePath}
+              className={selectedPath === entry.relativePath ? "ring-2 ring-accent" : ""}
+              actions={
+                <QuietButton onPress={() => void openEntry(entry)}>打开</QuietButton>
+              }
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <Tag>{entry.kind === "directory" ? "dir" : entry.previewKind}</Tag>
+                <strong className="text-sm">{entry.name}</strong>
+              </div>
+              {entry.kind === "file" ? (
+                <EmptyHint>
+                  {formatBytes(entry.sizeBytes)}
+                  {entry.large ? " · large" : ""}
+                </EmptyHint>
+              ) : null}
+            </ListCard>
+          ))}
+          {entries.length === 0 ? <EmptyHint>空目录或未加载</EmptyHint> : null}
+        </Stack>
 
-        <div className="artifact-preview">
-          <div className="artifact-preview-actions">
-            <button type="button" disabled={!selectedPath || busy} onClick={() => void openExternal("auto")}>
+        <Stack>
+          <RowActions>
+            <PrimaryButton isDisabled={!selectedPath || busy} onPress={() => void openExternal("auto")}>
               外部打开
-            </button>
-            <button type="button" className="quiet-button" disabled={!selectedPath || busy} onClick={() => void openExternal("office")}>
+            </PrimaryButton>
+            <QuietButton isDisabled={!selectedPath || busy} onPress={() => void openExternal("office")}>
               Office
-            </button>
-            <button type="button" className="quiet-button" disabled={!selectedPath || busy} onClick={() => void openExternal("wps")}>
+            </QuietButton>
+            <QuietButton isDisabled={!selectedPath || busy} onPress={() => void openExternal("wps")}>
               WPS
-            </button>
-            <button type="button" className="quiet-button" disabled={!selectedPath || busy} onClick={() => void detectChanges()}>
+            </QuietButton>
+            <QuietButton isDisabled={!selectedPath || busy} onPress={() => void detectChanges()}>
               检测变化
-            </button>
-            <button type="button" className="quiet-button" disabled={!selectedPath || busy} onClick={() => void reveal()}>
+            </QuietButton>
+            <QuietButton isDisabled={!selectedPath || busy} onPress={() => void reveal()}>
               资源管理器
-            </button>
-            <button type="button" className="quiet-button" disabled={!selectedPath || busy} onClick={() => void copyPath()}>
+            </QuietButton>
+            <QuietButton isDisabled={!selectedPath || busy} onPress={() => void copyPath()}>
               复制路径
-            </button>
-            <button type="button" className="quiet-button" disabled={!selectedPath || busy} onClick={() => void registerSelected()}>
+            </QuietButton>
+            <QuietButton isDisabled={!selectedPath || busy} onPress={() => void registerSelected()}>
               登记 Artifact
-            </button>
-          </div>
+            </QuietButton>
+          </RowActions>
 
-          {!preview && <p className="muted">选择文件以预览 Markdown / 代码 / 图片 / PDF / Office 只读提取。</p>}
+          {!preview ? (
+            <EmptyHint>选择文件以预览 Markdown / 代码 / 图片 / PDF / Office 只读提取。</EmptyHint>
+          ) : null}
 
-          {preview && (
-            <div className="artifact-preview-body">
-              <header>
-                <strong>{preview.relativePath}</strong>
-                <span className="tag">{preview.previewKind}</span>
-                {preview.truncated && <span className="tag">truncated</span>}
-                {!preview.ok && <span className="tag danger-label">preview error</span>}
-              </header>
-              {preview.error && <p className="muted">{preview.error}</p>}
-              {preview.parts && preview.parts.length > 0 && (
-                <p className="muted">Parts: {preview.parts.join(", ")}</p>
-              )}
-              {preview.pageCount !== undefined && <p className="muted">Pages ≈ {preview.pageCount}</p>}
+          {preview ? (
+            <Stack className="rounded-xl border border-border p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <strong className="text-sm">{preview.relativePath}</strong>
+                <Tag>{preview.previewKind}</Tag>
+                {preview.truncated ? <Tag color="warning">truncated</Tag> : null}
+                {!preview.ok ? <Tag color="danger">preview error</Tag> : null}
+              </div>
+              {preview.error ? <EmptyHint>{preview.error}</EmptyHint> : null}
+              {preview.parts && preview.parts.length > 0 ? (
+                <EmptyHint>Parts: {preview.parts.join(", ")}</EmptyHint>
+              ) : null}
+              {preview.pageCount !== undefined ? (
+                <EmptyHint>Pages ≈ {preview.pageCount}</EmptyHint>
+              ) : null}
 
-              {preview.previewKind === "image" && preview.base64 && (
+              {preview.previewKind === "image" && preview.base64 ? (
                 <img
-                  className="artifact-image"
+                  className="max-h-96 max-w-full rounded-lg border border-border"
                   alt={preview.relativePath}
                   src={`data:${preview.mimeType};base64,${preview.base64}`}
                 />
-              )}
-              {preview.previewKind === "pdf" && preview.base64 && (
+              ) : null}
+              {preview.previewKind === "pdf" && preview.base64 ? (
                 <iframe
-                  className="artifact-pdf"
+                  className="h-96 w-full rounded-lg border border-border"
                   title={preview.relativePath}
                   src={`data:application/pdf;base64,${preview.base64}`}
                 />
-              )}
+              ) : null}
               {(preview.previewKind === "docx" ||
                 preview.previewKind === "xlsx" ||
                 preview.previewKind === "pptx") &&
-                preview.html && (
-                  <div
-                    className="artifact-office-html"
-                    dangerouslySetInnerHTML={{ __html: preview.html }}
-                  />
-                )}
+              preview.html ? (
+                <div
+                  className="max-h-96 overflow-auto rounded-lg border border-border bg-field p-3 text-sm"
+                  dangerouslySetInnerHTML={{ __html: preview.html }}
+                />
+              ) : null}
               {preview.text &&
-                preview.previewKind !== "docx" &&
-                preview.previewKind !== "xlsx" &&
-                preview.previewKind !== "pptx" && (
-                  <pre className={preview.previewKind === "markdown" ? "artifact-md" : "artifact-code"}>
-                    {preview.text}
-                  </pre>
-                )}
+              preview.previewKind !== "docx" &&
+              preview.previewKind !== "xlsx" &&
+              preview.previewKind !== "pptx" ? (
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-field p-3 text-sm">
+                  {preview.text}
+                </pre>
+              ) : null}
               {(preview.previewKind === "docx" ||
                 preview.previewKind === "xlsx" ||
                 preview.previewKind === "pptx") &&
-                !preview.html &&
-                preview.text && <pre className="artifact-code">{preview.text}</pre>}
-            </div>
-          )}
+              !preview.html &&
+              preview.text ? (
+                <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-lg bg-field p-3 text-sm">
+                  {preview.text}
+                </pre>
+              ) : null}
+            </Stack>
+          ) : null}
 
-          {selectedArtifact && (
-            <aside className="artifact-meta">
-              <h4>Artifact 元数据</h4>
-              <dl>
-                <div>
-                  <dt>标题</dt>
-                  <dd>{selectedArtifact.title}</dd>
-                </div>
-                <div>
-                  <dt>版本</dt>
-                  <dd>v{selectedArtifact.currentVersion}</dd>
-                </div>
-                <div>
-                  <dt>生成者</dt>
-                  <dd>{selectedArtifact.createdBy ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>Run</dt>
-                  <dd>{selectedArtifact.runId ?? "—"}</dd>
-                </div>
-                <div>
-                  <dt>审查</dt>
-                  <dd>
-                    {selectedArtifact.reviewStatus}
-                    {selectedArtifact.reviewSummary ? ` · ${selectedArtifact.reviewSummary}` : ""}
-                  </dd>
-                </div>
-              </dl>
-              {selectedArtifact.evidenceLinks.length > 0 && (
+          {selectedArtifact ? (
+            <Stack className="rounded-xl border border-border p-4">
+              <strong>Artifact 元数据</strong>
+              <EmptyHint>标题：{selectedArtifact.title}</EmptyHint>
+              <EmptyHint>版本：v{selectedArtifact.currentVersion}</EmptyHint>
+              <EmptyHint>生成者：{selectedArtifact.createdBy ?? "—"}</EmptyHint>
+              <EmptyHint>Run：{selectedArtifact.runId ?? "—"}</EmptyHint>
+              <EmptyHint>
+                审查：{selectedArtifact.reviewStatus}
+                {selectedArtifact.reviewSummary ? ` · ${selectedArtifact.reviewSummary}` : ""}
+              </EmptyHint>
+              {selectedArtifact.evidenceLinks.length > 0 ? (
                 <>
-                  <h5>Evidence</h5>
-                  <ul>
+                  <strong className="text-sm">Evidence</strong>
+                  <ul className="m-0 list-disc space-y-1 pl-5 text-sm">
                     {selectedArtifact.evidenceLinks.map((link) => (
                       <li key={link.id}>
                         {link.summary}
@@ -417,11 +427,11 @@ export function ArtifactBrowserPanel({
                     ))}
                   </ul>
                 </>
-              )}
-              {selectedArtifact.diffLinks.length > 0 && (
+              ) : null}
+              {selectedArtifact.diffLinks.length > 0 ? (
                 <>
-                  <h5>Diff</h5>
-                  <ul>
+                  <strong className="text-sm">Diff</strong>
+                  <ul className="m-0 list-disc space-y-1 pl-5 text-sm">
                     {selectedArtifact.diffLinks.map((link, idx) => (
                       <li key={`${link.path}-${idx}`}>
                         {link.kind}: {link.path}
@@ -431,11 +441,11 @@ export function ArtifactBrowserPanel({
                     ))}
                   </ul>
                 </>
-              )}
-              {selectedArtifact.sourceLinks.length > 0 && (
+              ) : null}
+              {selectedArtifact.sourceLinks.length > 0 ? (
                 <>
-                  <h5>来源</h5>
-                  <ul>
+                  <strong className="text-sm">来源</strong>
+                  <ul className="m-0 list-disc space-y-1 pl-5 text-sm">
                     {selectedArtifact.sourceLinks.map((link, idx) => (
                       <li key={`${link.label}-${idx}`}>
                         {link.label}
@@ -445,53 +455,57 @@ export function ArtifactBrowserPanel({
                     ))}
                   </ul>
                 </>
-              )}
-              <h5>版本历史</h5>
-              <ol className="artifact-versions">
+              ) : null}
+              <strong className="text-sm">版本历史</strong>
+              <Stack>
                 {selectedArtifact.versions
                   .slice()
                   .reverse()
                   .map((v) => (
-                    <li key={v.id}>
-                      v{v.version} · {v.createdAt}
-                      {v.note ? ` · ${v.note}` : ""}
-                      <small> {v.contentHash.slice(0, 12)}</small>
-                    </li>
+                    <ListCard key={v.id}>
+                      <span className="text-sm">
+                        v{v.version} · {v.createdAt}
+                        {v.note ? ` · ${v.note}` : ""}
+                      </span>
+                      <EmptyHint>{v.contentHash.slice(0, 12)}</EmptyHint>
+                    </ListCard>
                   ))}
-              </ol>
-            </aside>
-          )}
-        </div>
+              </Stack>
+            </Stack>
+          ) : null}
+        </Stack>
 
-        <div className="artifact-catalog">
-          <h4>Artifact 索引</h4>
-          <ul className="artifact-catalog-list">
-            {catalog.map((item) => (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  onClick={() => {
+        <Stack>
+          <strong>Artifact 索引</strong>
+          {catalog.map((item) => (
+            <ListCard
+              key={item.id}
+              actions={
+                <QuietButton
+                  onPress={() => {
                     setSelectedArtifact(item);
                     setSelectedPath(item.relativePath);
                     if (activeProject) void client.preview(activeProject, item.relativePath).then(setPreview);
                   }}
                 >
-                  <strong>{item.title}</strong>
-                  <span>
-                    {item.relativePath} · v{item.currentVersion} · {item.reviewStatus}
-                  </span>
-                  <small>
-                    {item.origin}
-                    {item.runId ? ` · run ${item.runId}` : ""}
-                  </small>
-                </button>
-              </li>
-            ))}
-            {catalog.length === 0 && <li className="muted">暂无登记项</li>}
-          </ul>
-        </div>
+                  预览
+                </QuietButton>
+              }
+            >
+              <strong className="text-sm">{item.title}</strong>
+              <EmptyHint>
+                {item.relativePath} · v{item.currentVersion} · {item.reviewStatus}
+              </EmptyHint>
+              <EmptyHint>
+                {item.origin}
+                {item.runId ? ` · run ${item.runId}` : ""}
+              </EmptyHint>
+            </ListCard>
+          ))}
+          {catalog.length === 0 ? <EmptyHint>暂无登记项</EmptyHint> : null}
+        </Stack>
       </div>
-    </section>
+    </Panel>
   );
 }
 

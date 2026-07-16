@@ -42,10 +42,10 @@ const kindPriority: Record<WaitingItemKind, number> = {
 };
 
 const kindLabels: Record<WaitingItemKind, string> = {
-  plan_approval: "计划审批",
-  ask_user: "AskUser",
+  plan_approval: "Plan ready",
+  ask_user: "需要回答",
   dangerous_action: "危险操作",
-  acceptance: "最终验收",
+  acceptance: "待验收",
   review_failed: "审查失败",
   recovery: "中断恢复"
 };

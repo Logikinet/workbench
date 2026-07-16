@@ -430,6 +430,47 @@ export const CODEX_WORKTREE_EVIDENCE_KIND = "codex-worktree-evidence";
 /** Kind for each real changed file registered from an isolated Worktree. */
 export const CODEX_WORKTREE_FILE_KIND = "worktree-file";
 
+/** Per-model token counters for a Run (todos-style Token 用量). */
+export interface RunUsageModelBreakdown {
+  modelId: string;
+  connectionId?: string;
+  roleId?: string;
+  label?: string;
+  promptTokens: number;
+  completionTokens: number;
+  /** Provider cache / prompt-cache hits when reported; otherwise 0. */
+  cacheTokens: number;
+  totalTokens: number;
+  calls: number;
+  /** True when any portion was estimated (~4 chars/token) rather than API-reported. */
+  estimated: boolean;
+}
+
+/** Aggregated token usage for a single Run. */
+export interface RunUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  /** True when any model entry used estimates. */
+  estimated: boolean;
+  byModel: RunUsageModelBreakdown[];
+  updatedAt: string;
+}
+
+export interface RecordRunUsageInput {
+  modelId?: string;
+  connectionId?: string;
+  roleId?: string;
+  label?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  cacheTokens?: number;
+  totalTokens?: number;
+  calls?: number;
+  estimated?: boolean;
+}
+
 export interface Run {
   id: string;
   todoId: string;
@@ -454,6 +495,8 @@ export interface Run {
     previousStatus: RunStatus;
     since: string;
   };
+  /** Cumulative model token usage for this Run (planning + execution). */
+  usage?: RunUsage;
   timeline: TimelineEvent[];
   createdAt: string;
   updatedAt: string;
@@ -514,6 +557,7 @@ export class RunService {
           approvals: run.approvals ?? [],
           askUserRequests: Array.isArray(run.askUserRequests) ? run.askUserRequests : [],
           waitingForUserResume: run.waitingForUserResume,
+          usage: normalizeRunUsage(run.usage),
           checkpoints: persistedCheckpoints,
           checkpointRecovery: normalizeCheckpointRecovery(run.checkpointRecovery, persistedCheckpoints),
           reviewLoop: {
@@ -751,6 +795,17 @@ export class RunService {
     return this.mutate(() => this.recordLogUnsafe(runId, input));
   }
 
+  /** Accumulate token usage onto a Run (idempotent additive merge by modelId). */
+  async recordUsage(runId: string, input: RecordRunUsageInput): Promise<Run> {
+    return this.mutate(() => this.recordUsageUnsafe(runId, input));
+  }
+
+  /** Read aggregated token usage (zeros when none recorded). */
+  async getUsage(runId: string): Promise<RunUsage> {
+    const run = await this.get(runId);
+    return run.usage ? structuredClone(run.usage) : emptyRunUsage(new Date().toISOString());
+  }
+
   async recordReview(runId: string, input: { status: ReviewIndex["status"]; summary: string }): Promise<Run> {
     return this.mutate(() => this.recordReviewUnsafe(runId, input));
   }
@@ -833,10 +888,16 @@ export class RunService {
       updatedAt: now
     };
     if (initialMessage?.trim()) this.appendMessage(run, initialMessage.trim(), now);
-    await this.applyPlanningPipeline(run, {
-      title: todo.title,
-      description: todo.description
-    }, now);
+    // Todos-like fast path: never block create on model calls.
+    // Instant template plan so "开始执行" returns immediately; AI replan stays on updatePlanning.
+    const subject = { title: todo.title, description: todo.description };
+    this.applyTemplatePlanning(run, subject, now, {});
+    this.appendTimeline(
+      run,
+      "agent_status",
+      "已用本地模板生成计划（秒开）。批准后即可执行；需要时再重新规划。",
+      now
+    );
     this.state.runs.push(run);
     await this.persist();
     await this.todos.update(todoId, { status: "awaiting_confirmation" });
@@ -1775,6 +1836,63 @@ export class RunService {
     const now = new Date().toISOString();
     run.logs.push({ id: randomUUID(), ...input, createdAt: now });
     this.appendTimeline(run, "log", input.message, now);
+    await this.persist();
+    return run;
+  }
+
+  private async recordUsageUnsafe(runId: string, input: RecordRunUsageInput): Promise<Run> {
+    const run = await this.get(runId);
+    const now = new Date().toISOString();
+    const prompt = Math.max(0, Math.floor(input.promptTokens ?? 0));
+    const completion = Math.max(0, Math.floor(input.completionTokens ?? 0));
+    const cache = Math.max(0, Math.floor(input.cacheTokens ?? 0));
+    let total = Math.max(0, Math.floor(input.totalTokens ?? 0));
+    if (total <= 0) total = prompt + completion;
+    if (total <= 0 && prompt <= 0 && completion <= 0 && cache <= 0) {
+      return run;
+    }
+    // When only total is known, attribute to prompt so the modal still shows a bar.
+    const promptTokens = prompt > 0 ? prompt : total > 0 && completion <= 0 ? total : prompt;
+    const completionTokens = completion;
+    const estimated = Boolean(input.estimated) || (prompt <= 0 && completion <= 0 && total > 0);
+    const modelId = (input.modelId?.trim() || "unknown").slice(0, 120);
+    const calls = Math.max(1, Math.floor(input.calls ?? 1));
+
+    const usage = run.usage ?? emptyRunUsage(now);
+    let entry = usage.byModel.find((item) => item.modelId === modelId);
+    if (!entry) {
+      entry = {
+        modelId,
+        connectionId: input.connectionId,
+        roleId: input.roleId,
+        label: input.label,
+        promptTokens: 0,
+        completionTokens: 0,
+        cacheTokens: 0,
+        totalTokens: 0,
+        calls: 0,
+        estimated: false
+      };
+      usage.byModel.push(entry);
+    }
+    entry.promptTokens += promptTokens;
+    entry.completionTokens += completionTokens;
+    entry.cacheTokens += cache;
+    entry.totalTokens += total;
+    entry.calls += calls;
+    if (estimated) entry.estimated = true;
+    if (input.connectionId) entry.connectionId = input.connectionId;
+    if (input.roleId) entry.roleId = input.roleId;
+    if (input.label) entry.label = input.label;
+
+    usage.promptTokens = usage.byModel.reduce((sum, item) => sum + item.promptTokens, 0);
+    usage.completionTokens = usage.byModel.reduce((sum, item) => sum + item.completionTokens, 0);
+    usage.cacheTokens = usage.byModel.reduce((sum, item) => sum + item.cacheTokens, 0);
+    usage.totalTokens = usage.byModel.reduce((sum, item) => sum + item.totalTokens, 0);
+    usage.estimated = usage.byModel.some((item) => item.estimated);
+    usage.updatedAt = now;
+    run.usage = usage;
+    run.updatedAt = now;
     await this.persist();
     return run;
   }
@@ -2724,4 +2842,48 @@ function dangerousApprovalKind(actionKind: CheckpointActionKind | string): Execu
   if (actionKind === "system_install") return "system_install";
   if (actionKind === "external_send") return "external_send";
   return "unsupported_operation";
+}
+
+function emptyRunUsage(updatedAt: string): RunUsage {
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    cacheTokens: 0,
+    totalTokens: 0,
+    estimated: false,
+    byModel: [],
+    updatedAt
+  };
+}
+
+function normalizeRunUsage(value: RunUsage | undefined): RunUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const byModel = Array.isArray(value.byModel)
+    ? value.byModel
+        .filter((entry) => entry && typeof entry.modelId === "string" && entry.modelId.trim())
+        .map((entry) => ({
+          modelId: entry.modelId.trim(),
+          connectionId: typeof entry.connectionId === "string" ? entry.connectionId : undefined,
+          roleId: typeof entry.roleId === "string" ? entry.roleId : undefined,
+          label: typeof entry.label === "string" ? entry.label : undefined,
+          promptTokens: Math.max(0, Math.floor(entry.promptTokens ?? 0)),
+          completionTokens: Math.max(0, Math.floor(entry.completionTokens ?? 0)),
+          cacheTokens: Math.max(0, Math.floor(entry.cacheTokens ?? 0)),
+          totalTokens: Math.max(0, Math.floor(entry.totalTokens ?? 0)),
+          calls: Math.max(0, Math.floor(entry.calls ?? 0)),
+          estimated: Boolean(entry.estimated)
+        }))
+    : [];
+  if (byModel.length === 0 && !(value.totalTokens > 0 || value.promptTokens > 0 || value.completionTokens > 0)) {
+    return undefined;
+  }
+  return {
+    promptTokens: Math.max(0, Math.floor(value.promptTokens ?? byModel.reduce((s, e) => s + e.promptTokens, 0))),
+    completionTokens: Math.max(0, Math.floor(value.completionTokens ?? byModel.reduce((s, e) => s + e.completionTokens, 0))),
+    cacheTokens: Math.max(0, Math.floor(value.cacheTokens ?? byModel.reduce((s, e) => s + e.cacheTokens, 0))),
+    totalTokens: Math.max(0, Math.floor(value.totalTokens ?? byModel.reduce((s, e) => s + e.totalTokens, 0))),
+    estimated: Boolean(value.estimated) || byModel.some((e) => e.estimated),
+    byModel,
+    updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : new Date().toISOString()
+  };
 }

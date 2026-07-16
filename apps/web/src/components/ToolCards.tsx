@@ -4,6 +4,18 @@ import type {
   SessionCardRecord,
   ToolCardPayload
 } from "../lib/sessions.js";
+import {
+  DangerButton,
+  EmptyHint,
+  FormBlock,
+  ListCard,
+  Notice,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  Stack,
+  Tag
+} from "./ui.js";
 
 interface ToolCardsProps {
   cards: SessionCardRecord[];
@@ -50,27 +62,23 @@ export function ToolCards({
   const hiddenOlder = Math.max(0, cards.length - visible.length);
 
   return (
-    <div className="tool-cards" role="log" aria-label="会话卡片时间线">
-      {hiddenOlder > 0 && (
-        <p className="tool-cards-virtual-hint">
+    <div className="grid gap-3" role="log" aria-label="会话卡片时间线">
+      {hiddenOlder > 0 ? (
+        <EmptyHint>
           已折叠较早 {hiddenOlder} 张卡片（按需加载 / 虚拟化窗口 {viewportLimit}）
-        </p>
-      )}
+        </EmptyHint>
+      ) : null}
       {visible.map((card) => (
-        <article key={card.id} className={`session-card session-card-${card.kind}`} data-sequence={card.sequence}>
-          <header className="session-card-header">
-            <span className="tag">{kindLabels[card.kind]}</span>
-            <small>#{card.sequence}</small>
+        <ListCard key={card.id} className="flex-col items-stretch">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <Tag color="accent">{kindLabels[card.kind]}</Tag>
+            <span className="text-xs text-muted">#{card.sequence}</span>
             {(card.kind === "tool_call" || card.logBody || (card.text && card.text.length > 200)) && (
-              <button
-                type="button"
-                className="quiet-button"
-                onClick={() => onToggleCollapse?.(card)}
-              >
+              <QuietButton onPress={() => onToggleCollapse?.(card)}>
                 {card.collapsed ? "展开" : "折叠"}
-              </button>
+              </QuietButton>
             )}
-          </header>
+          </div>
 
           {card.kind === "tool_call" && card.tool ? (
             <ToolCardView tool={card.tool} collapsed={card.collapsed} />
@@ -88,22 +96,24 @@ export function ToolCards({
               onAnswer={(payload) => onAnswer?.(card, payload)}
             />
           ) : card.kind === "artifact" && card.artifact ? (
-            <div className="session-card-body">
+            <Stack>
               <strong>{card.artifact.path}</strong>
-              <span>{card.artifact.kind}</span>
-              {card.artifact.summary && <p>{card.artifact.summary}</p>}
-            </div>
+              <Tag>{card.artifact.kind}</Tag>
+              {card.artifact.summary ? <p className="m-0 text-sm">{card.artifact.summary}</p> : null}
+            </Stack>
           ) : (
-            <div className="session-card-body">
+            <Stack>
               {card.collapsed ? (
-                <p className="session-card-summary">{card.summary}</p>
+                <p className="m-0 text-sm text-muted">{card.summary}</p>
               ) : (
-                <pre className="session-card-text">{card.text ?? card.summary}</pre>
+                <pre className="m-0 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-field p-3 text-sm">
+                  {card.text ?? card.summary}
+                </pre>
               )}
-              {card.logTruncated && <small>日志已截断，完整内容按需加载。</small>}
-            </div>
+              {card.logTruncated ? <EmptyHint>日志已截断，完整内容按需加载。</EmptyHint> : null}
+            </Stack>
           )}
-        </article>
+        </ListCard>
       ))}
     </div>
   );
@@ -111,25 +121,31 @@ export function ToolCards({
 
 function ToolCardView({ tool, collapsed }: { tool: ToolCardPayload; collapsed: boolean }) {
   return (
-    <div className={`tool-card tool-card-${tool.status}`} aria-label={`工具 ${tool.toolName}`}>
-      <div className="tool-card-title-row">
+    <div className="grid gap-3" aria-label={`工具 ${tool.toolName}`}>
+      <div className="flex flex-wrap items-center gap-2">
         <strong>{tool.title || tool.toolName}</strong>
-        <span className="tag">{tool.status}</span>
-        <span className="tag">{tool.permission}</span>
-        {tool.durationMs !== undefined && <small>{formatDuration(tool.durationMs)}</small>}
+        <Tag color={tool.status === "failed" ? "danger" : tool.status === "completed" ? "success" : "default"}>
+          {tool.status}
+        </Tag>
+        <Tag>{tool.permission}</Tag>
+        {tool.durationMs !== undefined ? (
+          <span className="text-xs text-muted">{formatDuration(tool.durationMs)}</span>
+        ) : null}
       </div>
-      <p className="tool-card-args">
-        <span>参数</span> {tool.argumentsSummary}
+      <p className="m-0 text-sm">
+        <span className="text-muted">参数 </span>
+        {tool.argumentsSummary}
       </p>
-      {!collapsed && (
+      {!collapsed ? (
         <>
-          {tool.outputSummary && (
-            <p className="tool-card-output">
-              <span>输出</span> {tool.outputSummary}
+          {tool.outputSummary ? (
+            <p className="m-0 text-sm">
+              <span className="text-muted">输出 </span>
+              {tool.outputSummary}
             </p>
-          )}
-          {tool.artifactLinks.length > 0 && (
-            <ul className="tool-card-links">
+          ) : null}
+          {tool.artifactLinks.length > 0 ? (
+            <ul className="m-0 list-disc space-y-1 pl-5 text-sm">
               {tool.artifactLinks.map((link) => (
                 <li key={link.path}>
                   Artifact: <code>{link.path}</code>
@@ -137,9 +153,9 @@ function ToolCardView({ tool, collapsed }: { tool: ToolCardPayload; collapsed: b
                 </li>
               ))}
             </ul>
-          )}
-          {tool.evidenceLinks.length > 0 && (
-            <ul className="tool-card-links">
+          ) : null}
+          {tool.evidenceLinks.length > 0 ? (
+            <ul className="m-0 list-disc space-y-1 pl-5 text-sm">
               {tool.evidenceLinks.map((link) => (
                 <li key={link.id}>
                   Evidence: {link.summary}
@@ -147,10 +163,10 @@ function ToolCardView({ tool, collapsed }: { tool: ToolCardPayload; collapsed: b
                 </li>
               ))}
             </ul>
-          )}
+          ) : null}
         </>
-      )}
-      {collapsed && <p className="session-card-summary">{tool.outputSummary ?? tool.argumentsSummary}</p>}
+      ) : null}
+      {collapsed ? <EmptyHint>{tool.outputSummary ?? tool.argumentsSummary}</EmptyHint> : null}
     </div>
   );
 }
@@ -170,25 +186,22 @@ function AskCardView({
   const pending = ask.status === "pending" && !readOnly;
 
   return (
-    <div className="ask-card-inline">
-      <p>{ask.prompt}</p>
-      {ask.reason && <small>{ask.reason}</small>}
-      {ask.status === "answered" && <p className="notice">已回答：{ask.answerSummary}</p>}
-      {pending && kind === "ask_approval" && (
-        <div className="session-card-actions">
-          <button type="button" onClick={() => onAnswer({ approved: true })}>批准</button>
-          <button type="button" className="danger-button" onClick={() => onAnswer({ approved: false })}>
-            拒绝
-          </button>
-        </div>
-      )}
-      {pending && kind !== "ask_approval" && (
-        <AskFreeform
-          options={ask.options}
-          onSubmit={(payload) => onAnswer(payload)}
-        />
-      )}
-    </div>
+    <Stack>
+      <p className="m-0 text-sm">{ask.prompt}</p>
+      {ask.reason ? <EmptyHint>{ask.reason}</EmptyHint> : null}
+      {ask.status === "answered" ? <Notice>已回答：{ask.answerSummary}</Notice> : null}
+      {pending && kind === "ask_approval" ? (
+        <RowActions>
+          <PrimaryButton size="sm" onPress={() => onAnswer({ approved: true })}>
+            批准
+          </PrimaryButton>
+          <DangerButton onPress={() => onAnswer({ approved: false })}>拒绝</DangerButton>
+        </RowActions>
+      ) : null}
+      {pending && kind !== "ask_approval" ? (
+        <AskFreeform options={ask.options} onSubmit={(payload) => onAnswer(payload)} />
+      ) : null}
+    </Stack>
   );
 }
 
@@ -200,8 +213,7 @@ function AskFreeform({
   onSubmit(payload: { selectedOptionIds?: string[]; freeText?: string }): void;
 }) {
   return (
-    <form
-      className="session-card-actions"
+    <FormBlock
       onSubmit={(event) => {
         event.preventDefault();
         const form = event.currentTarget;
@@ -214,14 +226,21 @@ function AskFreeform({
       }}
     >
       {options?.map((option) => (
-        <label key={option.id} className="inline-check">
+        <label key={option.id} className="inline-flex items-center gap-2 text-sm">
           <input type="checkbox" name="opt" value={option.id} />
           {option.label}
         </label>
       ))}
-      <textarea name="freeText" rows={2} placeholder="补充说明（可选）" />
-      <button type="submit">提交回答</button>
-    </form>
+      <textarea
+        name="freeText"
+        rows={2}
+        placeholder="补充说明（可选）"
+        className="w-full min-h-24 rounded-lg border border-border bg-field px-3 py-2.5 text-sm text-foreground"
+      />
+      <PrimaryButton type="submit" size="sm">
+        提交回答
+      </PrimaryButton>
+    </FormBlock>
   );
 }
 
@@ -236,30 +255,30 @@ function AcceptanceCardView({
 }) {
   if (!acceptance) return null;
   return (
-    <div className="acceptance-card-inline">
-      <p>{acceptance.summary}</p>
-      {acceptance.criteria && acceptance.criteria.length > 0 && (
-        <ul>
+    <Stack>
+      <p className="m-0 text-sm">{acceptance.summary}</p>
+      {acceptance.criteria && acceptance.criteria.length > 0 ? (
+        <ul className="m-0 list-disc space-y-1 pl-5 text-sm">
           {acceptance.criteria.map((item) => (
             <li key={item}>{item}</li>
           ))}
         </ul>
-      )}
-      {acceptance.status !== "pending" && (
-        <p className="notice">
+      ) : null}
+      {acceptance.status !== "pending" ? (
+        <Notice>
           {acceptance.status === "accepted" ? "已验收" : "已拒绝"}
           {acceptance.decisionNote ? `：${acceptance.decisionNote}` : ""}
-        </p>
-      )}
-      {acceptance.status === "pending" && !readOnly && (
-        <div className="session-card-actions">
-          <button type="button" onClick={() => onAnswer({ approved: true })}>通过验收</button>
-          <button type="button" className="danger-button" onClick={() => onAnswer({ approved: false })}>
-            拒绝验收
-          </button>
-        </div>
-      )}
-    </div>
+        </Notice>
+      ) : null}
+      {acceptance.status === "pending" && !readOnly ? (
+        <RowActions>
+          <PrimaryButton size="sm" onPress={() => onAnswer({ approved: true })}>
+            通过验收
+          </PrimaryButton>
+          <DangerButton onPress={() => onAnswer({ approved: false })}>拒绝验收</DangerButton>
+        </RowActions>
+      ) : null}
+    </Stack>
   );
 }
 

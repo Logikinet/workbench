@@ -150,9 +150,26 @@ export class ProfessionalAgentService {
   async start(runId: string, input: StartProfessionalAgentInput): Promise<Run> {
     if (this.active.has(runId)) throw new Error("This Run already has an active Professional Agent.");
     const current = await this.options.runs.get(runId);
-    // Fail-closed: even if Worktree DI was omitted at assembly, never let code tasks write the main workspace.
+    // Prefer Codex isolation for code tasks when a Codex role exists.
+    // Local single-user workbench: if no Codex CLI role is configured, allow API agent
+    // on the approved Project workspace so "create task → plan → execute" is not a dead shell.
     if (isCodeTask(current.planning?.assessment.taskType)) {
-      throw new Error("代码任务必须通过隔离 Git Worktree 的 Codex CLI Harness 执行；API Professional Agent 不会直接修改主工作区。");
+      const roleList = await this.options.roles.list();
+      const hasCodex = roleList.some((role) => role.enabled && role.harness === "codex-cli");
+      if (hasCodex && !input.roleId) {
+        throw new Error(
+          "代码任务必须通过隔离 Git Worktree 的 Codex CLI Harness 执行；请选择 Codex 角色，或先移除/停用 Codex 角色以允许 API Agent 在项目工作区执行。"
+        );
+      }
+      if (hasCodex) {
+        const selected = roleList.find((role) => role.id === input.roleId);
+        if (selected && selected.harness !== "codex-cli") {
+          throw new Error(
+            "代码任务必须通过隔离 Git Worktree 的 Codex CLI Harness 执行；API Professional Agent 不会直接修改主工作区。"
+          );
+        }
+      }
+      // else: no Codex role → API Professional Agent may run (project workspace only).
     }
     const retryingInterruptedRun = !input.roleId
       && !input.temporaryAgent
@@ -423,7 +440,7 @@ export class ProfessionalAgentService {
             .map((message) => `${message.role}: ${message.content}`)
             .join("\n\n");
           const systemFromMessages = messages.find((message) => message.role === "system")?.content;
-          const content = await this.invokeModelTurn({
+          return this.invokeModelTurn({
             runId,
             selection,
             signal: turnSignal,
@@ -431,7 +448,6 @@ export class ProfessionalAgentService {
             checkpointSummary,
             systemOverride: systemFromMessages
           });
-          return { content };
         },
         onEvent: async (event) => {
           await this.recordToolLoopEvent(runId, event);
@@ -444,7 +460,33 @@ export class ProfessionalAgentService {
       }
     );
 
+    await this.recordLoopUsage(runId, selection, loopResult);
     await this.applyToolLoopResult(runId, selection, project.workspacePath, project.id, completedSteps, interruptedStep, loopResult, signal);
+  }
+
+  private async recordLoopUsage(
+    runId: string,
+    selection: ProfessionalAgentSelection,
+    loopResult: ToolLoopResult
+  ): Promise<void> {
+    if (loopResult.totalTokens <= 0 && loopResult.promptTokens <= 0 && loopResult.completionTokens <= 0) {
+      return;
+    }
+    try {
+      await this.options.runs.recordUsage(runId, {
+        modelId: selection.modelId || "unknown",
+        connectionId: selection.connectionId,
+        roleId: selection.roleId,
+        label: selection.name,
+        promptTokens: loopResult.promptTokens,
+        completionTokens: loopResult.completionTokens,
+        totalTokens: loopResult.totalTokens,
+        calls: Math.max(1, loopResult.turns),
+        estimated: loopResult.tokensEstimated
+      });
+    } catch {
+      // Usage accounting must never break execution.
+    }
   }
 
   private async resolveSystemInstruction(runId: string, selection: ProfessionalAgentSelection): Promise<string> {
@@ -738,7 +780,7 @@ export class ProfessionalAgentService {
     checkpointSummary?: string;
     /** Optional multi-turn system text (tool catalog); falls back to Role instruction. */
     systemOverride?: string;
-  }): Promise<string> {
+  }): Promise<{ content: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } }> {
     const adapter = this.runtimeAdapter;
     const roleId = input.selection.roleId;
     const systemInstruction = input.systemOverride?.trim() || input.selection.systemInstruction;
@@ -776,7 +818,8 @@ export class ProfessionalAgentService {
         if (!drained.text.trim()) {
           throw new Error("Professional Agent output must be valid JSON.");
         }
-        return drained.text;
+        // Runtime adapter path often lacks provider usage; toolLoop estimates from content.
+        return { content: drained.text };
       } finally {
         input.signal.removeEventListener("abort", onAbort);
         await adapter.dispose(session.sessionId).catch(() => undefined);
@@ -786,7 +829,7 @@ export class ProfessionalAgentService {
     // Legacy path — temporary agents and explicit preferRuntimeAdapter: false.
     const connectionId = input.selection.connectionId;
     if (!connectionId) throw new Error("The selected API-backed Professional Agent needs a model connection.");
-    return this.options.connections.chatCompletion(connectionId, {
+    const detailed = await this.options.connections.chatCompletionDetailed(connectionId, {
       modelId: input.selection.modelId,
       signal: input.signal,
       messages: [
@@ -794,6 +837,7 @@ export class ProfessionalAgentService {
         { role: "user", content: input.userPayload }
       ]
     });
+    return { content: detailed.content, usage: detailed.usage };
   }
 
   private abort(runId: string): void {

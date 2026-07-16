@@ -1,6 +1,18 @@
 import { useMemo, useState } from "react";
 import { createRunClient, type RunRecord } from "../lib/runs.js";
 import type { TodoRecord } from "../lib/todos.js";
+import {
+  EmptyHint,
+  Field,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  Stack,
+  Tag,
+  TextAreaField
+} from "./ui.js";
 
 interface ReviewPanelProps {
   serviceUrl: string;
@@ -11,7 +23,14 @@ interface ReviewPanelProps {
   readOnly?: boolean;
 }
 
-export function ReviewPanel({ serviceUrl, run, onRunChange, onNotice, onTodoChange, readOnly = false }: ReviewPanelProps) {
+export function ReviewPanel({
+  serviceUrl,
+  run,
+  onRunChange,
+  onNotice,
+  onTodoChange,
+  readOnly = false
+}: ReviewPanelProps) {
   const client = createRunClient(serviceUrl);
   const [summary, setSummary] = useState("");
   const [autoFix, setAutoFix] = useState(true);
@@ -24,11 +43,16 @@ export function ReviewPanel({ serviceUrl, run, onRunChange, onNotice, onTodoChan
   const canReview = run.status === "awaiting_review" && run.execution.status === "succeeded";
   const canAccept = run.status === "awaiting_acceptance" && gating?.status === "passed" && !loop?.pendingFixInstruction;
   const autoFixRemaining = (loop?.autoFixCyclesUsed ?? 0) < (loop?.maxAutoFixCycles ?? 1);
-  const canAutoDispatchFix = gating?.status === "changes_requested" && autoFixRemaining && run.status !== "completed" && run.execution.status !== "running";
-  const canUserDispatchFix = (
-    (gating?.status === "changes_requested" && !autoFixRemaining)
-    || (loop?.reworkRequested === true && run.status === "awaiting_acceptance")
-  ) && run.status !== "completed" && run.execution.status !== "running";
+  const canAutoDispatchFix =
+    gating?.status === "changes_requested" &&
+    autoFixRemaining &&
+    run.status !== "completed" &&
+    run.execution.status !== "running";
+  const canUserDispatchFix =
+    ((gating?.status === "changes_requested" && !autoFixRemaining) ||
+      (loop?.reworkRequested === true && run.status === "awaiting_acceptance")) &&
+    run.status !== "completed" &&
+    run.execution.status !== "running";
 
   const perform = async () => {
     try {
@@ -72,88 +96,116 @@ export function ReviewPanel({ serviceUrl, run, onRunChange, onNotice, onTodoChan
       const result = await client.decideAcceptance(run.id, { decision, summary: note });
       onRunChange(result.run);
       onTodoChange?.(result.todo as TodoRecord);
-      onNotice(decision === "accepted" ? "用户已验收；Run 与 Todo 正式完成。" : "用户未接受；不得标记完成。可再次接受或授权返工修复。");
+      onNotice(
+        decision === "accepted"
+          ? "用户已验收；Run 与 Todo 正式完成。"
+          : "用户未接受；不得标记完成。可再次接受或授权返工修复。"
+      );
       setSummary("");
     } catch (error) {
       onNotice(error instanceof Error ? error.message : "无法记录验收决定");
     }
   };
 
-  if (run.execution.status === "idle" && run.reviews.length === 0 && run.status !== "awaiting_review" && run.status !== "awaiting_acceptance") {
+  if (
+    run.execution.status === "idle" &&
+    run.reviews.length === 0 &&
+    run.status !== "awaiting_review" &&
+    run.status !== "awaiting_acceptance"
+  ) {
     return null;
   }
 
   return (
-    <section className="review-panel" aria-label="独立审查与用户验收">
-      <header>
-        <p className="eyebrow">NO-MISTAKES REVIEW</p>
-        <h4>独立审查与最终验收</h4>
-      </header>
-      <p>Reviewer 使用独立上下文（目标、批准计划、验收标准、成果与证据），只输出结论，不修改成果。时间线备注审查不会开启验收。</p>
-      <div className="review-meta">
-        <span className={`tag ${gating?.status === "passed" ? "active" : ""}`}>
+    <Panel
+      eyebrow="NO-MISTAKES REVIEW"
+      title="独立审查与最终验收"
+      description="Reviewer 使用独立上下文（目标、批准计划、验收标准、成果与证据），只输出结论，不修改成果。时间线备注审查不会开启验收。"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Tag color={gating?.status === "passed" ? "success" : "default"}>
           {gating ? `独立审查：${gating.status}` : "尚未独立审查"}
+        </Tag>
+        <span className="text-sm">
+          自动修复：{loop?.autoFixCyclesUsed ?? 0}/{loop?.maxAutoFixCycles ?? 1}
         </span>
-        <span>自动修复：{loop?.autoFixCyclesUsed ?? 0}/{loop?.maxAutoFixCycles ?? 1}</span>
-        {loop?.userAccepted === true && <span className="tag active">用户已接受</span>}
-        {loop?.userAccepted === false && <span className="tag">用户未接受</span>}
-        {loop?.reworkRequested && <span className="tag">可授权返工</span>}
+        {loop?.userAccepted === true ? <Tag color="success">用户已接受</Tag> : null}
+        {loop?.userAccepted === false ? <Tag color="warning">用户未接受</Tag> : null}
+        {loop?.reworkRequested ? <Tag color="accent">可授权返工</Tag> : null}
       </div>
-      {latest && (
-        <div className="review-result">
+
+      {latest ? (
+        <Stack>
           <strong>{latest.summary}</strong>
-          {latest.severity && latest.severity !== "none" && <p>严重程度：{latest.severity}</p>}
-          {latest.fixScope && <p>修复范围：{latest.fixScope}</p>}
-          {latest.evidence && latest.evidence.length > 0 && (
-            <details>
-              <summary>审查证据</summary>
-              <ul>{latest.evidence.map((item, index) => <li key={`evidence-${index}`}>{item}</li>)}</ul>
+          {latest.severity && latest.severity !== "none" ? (
+            <EmptyHint>严重程度：{latest.severity}</EmptyHint>
+          ) : null}
+          {latest.fixScope ? <EmptyHint>修复范围：{latest.fixScope}</EmptyHint> : null}
+          {latest.evidence && latest.evidence.length > 0 ? (
+            <details className="rounded-xl border border-border p-3">
+              <summary className="cursor-pointer text-sm font-medium">审查证据</summary>
+              <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
+                {latest.evidence.map((item, index) => (
+                  <li key={`evidence-${index}`}>{item}</li>
+                ))}
+              </ul>
             </details>
-          )}
-          {latest.findings && latest.findings.length > 0 && (
-            <details>
-              <summary>验收发现</summary>
-              <ul>
+          ) : null}
+          {latest.findings && latest.findings.length > 0 ? (
+            <details className="rounded-xl border border-border p-3">
+              <summary className="cursor-pointer text-sm font-medium">验收发现</summary>
+              <ul className="mt-2 list-disc space-y-2 pl-5 text-sm">
                 {latest.findings.map((finding, index) => (
                   <li key={`finding-${index}`}>
                     <strong>{finding.met ? "通过" : "未通过"}</strong> · {finding.criterion}
                     <br />
-                    <small>{finding.evidence}</small>
+                    <span className="text-muted">{finding.evidence}</span>
                   </li>
                 ))}
               </ul>
             </details>
-          )}
-        </div>
-      )}
-      {!readOnly && canReview && (
-        <div className="review-actions">
-          <label className="inline-check">
+          ) : null}
+        </Stack>
+      ) : null}
+
+      {!readOnly && canReview ? (
+        <Stack>
+          <label className="inline-flex items-center gap-2 text-sm">
             <input type="checkbox" checked={autoFix} onChange={(event) => setAutoFix(event.target.checked)} />
             失败时自动派发一次修复（默认最多 1 次）
           </label>
-          <button type="button" onClick={() => void perform()}>启动独立审查</button>
-        </div>
-      )}
-      {!readOnly && canAutoDispatchFix && !canReview && (
-        <button type="button" className="quiet-button" onClick={() => void dispatchFix(false)}>派发自动修复</button>
-      )}
-      {!readOnly && canUserDispatchFix && (
-        <button type="button" className="quiet-button" onClick={() => void dispatchFix(true)}>用户授权再次修复</button>
-      )}
-      {!readOnly && canAccept && (
-        <div className="acceptance-actions">
-          <textarea
-            aria-label="验收说明"
-            placeholder="验收说明（拒绝时必填）"
-            value={summary}
-            onChange={(event) => setSummary(event.target.value)}
-          />
-          <button type="button" onClick={() => void decide("accepted")}>接受并完成</button>
-          <button type="button" className="quiet-button" onClick={() => void decide("rejected")}>拒绝验收</button>
-        </div>
-      )}
-      {run.status === "completed" && <p className="notice">审查通过且用户已验收；Run 与 Todo 已正式完成。</p>}
-    </section>
+          <PrimaryButton onPress={() => void perform()}>启动独立审查</PrimaryButton>
+        </Stack>
+      ) : null}
+
+      {!readOnly && canAutoDispatchFix && !canReview ? (
+        <QuietButton onPress={() => void dispatchFix(false)}>派发自动修复</QuietButton>
+      ) : null}
+
+      {!readOnly && canUserDispatchFix ? (
+        <QuietButton onPress={() => void dispatchFix(true)}>用户授权再次修复</QuietButton>
+      ) : null}
+
+      {!readOnly && canAccept ? (
+        <Stack>
+          <Field label="验收说明">
+            <TextAreaField
+              aria-label="验收说明"
+              placeholder="验收说明（拒绝时必填）"
+              value={summary}
+              onChange={(event) => setSummary(event.target.value)}
+            />
+          </Field>
+          <RowActions>
+            <PrimaryButton onPress={() => void decide("accepted")}>接受并完成</PrimaryButton>
+            <QuietButton onPress={() => void decide("rejected")}>拒绝验收</QuietButton>
+          </RowActions>
+        </Stack>
+      ) : null}
+
+      {run.status === "completed" ? (
+        <Notice>审查通过且用户已验收；Run 与 Todo 已正式完成。</Notice>
+      ) : null}
+    </Panel>
   );
 }

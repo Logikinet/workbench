@@ -1,3 +1,4 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
@@ -5,6 +6,7 @@ import { VitePWA } from "vite-plugin-pwa";
 export default defineConfig({
   plugins: [
     react(),
+    tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
@@ -13,8 +15,8 @@ export default defineConfig({
         description: "本地优先的受控 AI 工作台",
         display: "standalone",
         start_url: "/",
-        theme_color: "#101826",
-        background_color: "#101826",
+        theme_color: "#0a0a0b",
+        background_color: "#0a0a0b",
         icons: [
           {
             src: "/icon.svg",

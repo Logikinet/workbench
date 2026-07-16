@@ -12,7 +12,7 @@ export class ConnectionModelProvider implements ModelProvider {
     if (request.signal?.aborted) {
       throw Object.assign(new Error("Model invocation was cancelled."), { kind: "cancelled" as const, name: "AbortError" });
     }
-    const content = await this.connections.chatCompletion(request.connectionId, {
+    const detailed = await this.connections.chatCompletionDetailed(request.connectionId, {
       modelId: request.modelId,
       signal: request.signal,
       messages: request.messages.map((message) => {
@@ -23,6 +23,6 @@ export class ConnectionModelProvider implements ModelProvider {
         return { role: message.role, content: message.content };
       })
     });
-    return { content };
+    return { content: detailed.content, usage: detailed.usage };
   }
 }

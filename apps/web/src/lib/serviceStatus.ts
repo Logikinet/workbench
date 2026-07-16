@@ -26,13 +26,16 @@ export function serviceFailureStatus(error: unknown): ServiceStatus {
 export function serviceStatusCopy(status: ServiceStatus): { label: string; detail: string } {
   switch (status.kind) {
     case "online":
-      return { label: "本地服务在线", detail: `版本 ${status.version} · ${status.capabilities.join("、")}` };
+      return {
+        label: "在线",
+        detail: `版本 ${status.version} · ${status.capabilities.join("、")}`
+      };
     case "offline":
       return {
-        label: "本地服务离线",
-        detail: "请从 Windows 托盘启动 Personal AI Workbench Service，然后重试。"
+        label: "离线",
+        detail: "请从 Windows 托盘启动 Personal AI Workbench Service 后重试。"
       };
     case "error":
-      return { label: "连接异常", detail: status.detail };
+      return { label: "异常", detail: status.detail };
   }
 }

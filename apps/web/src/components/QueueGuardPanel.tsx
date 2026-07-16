@@ -5,6 +5,21 @@ import {
   type QueueStatusRecord,
   type StopAllResultRecord
 } from "../lib/queue.js";
+import {
+  DangerButton,
+  EmptyHint,
+  Field,
+  FormBlock,
+  Grid2,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  Stack,
+  Tag,
+  TextInput
+} from "./ui.js";
 
 interface QueueGuardPanelProps {
   serviceUrl: string;
@@ -90,128 +105,126 @@ export function QueueGuardPanel({ serviceUrl, available, dataEpoch = 0 }: QueueG
   };
 
   return (
-    <section className="workspace-panel" aria-labelledby="queue-panel-title">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">QUEUE & RESOURCE GUARDS</p>
-          <h2 id="queue-panel-title">队列、并行与资源保护</h2>
+    <Panel
+      eyebrow="QUEUE & RESOURCE GUARDS"
+      title="队列、并行与资源保护"
+      description="默认仅 1 个写入型代理；只读/调研默认可并行 2 个。同一项目写入仅在 Worktree 隔离时允许并行。磁盘/内存不足时会暂停新任务。"
+      actions={
+        <div className="flex flex-wrap gap-2">
+          <QuietButton onPress={() => void reload()} isDisabled={!available || busy}>
+            刷新
+          </QuietButton>
+          <DangerButton isDisabled={!available || busy} onPress={() => void stopAll()}>
+            一键停止全部 Run
+          </DangerButton>
         </div>
-        <button type="button" className="danger-button" disabled={!available || busy} onClick={() => void stopAll()}>
-          一键停止全部 Run
-        </button>
-      </div>
-      <p className="protected-note">
-        默认仅 1 个写入型代理；只读/调研默认可并行 2 个。同一项目写入仅在 Worktree 隔离时允许并行。磁盘/内存不足时会暂停新任务。
-      </p>
-      {status?.newTasksPaused && (
-        <p className="notice" role="status">新任务已暂停：{status.pauseReason}</p>
-      )}
-      {status && (
-        <p>
+      }
+    >
+      {status?.newTasksPaused ? (
+        <Notice tone="warning">新任务已暂停：{status.pauseReason}</Notice>
+      ) : null}
+
+      {status ? (
+        <p className="m-0 text-sm text-foreground">
           当前占用：写入 {status.writeCount} · 只读 {status.readOnlyCount}
           {status.resource
             ? ` · 可用磁盘 ${formatMb(status.resource.freeDiskBytes)} · 可用内存 ${formatMb(status.resource.freeMemoryBytes)}`
             : ""}
         </p>
+      ) : (
+        <EmptyHint>尚未加载队列状态。</EmptyHint>
       )}
-      <form className="queue-form" onSubmit={(event) => void save(event)}>
-        <label>
-          写入并行上限
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={config.maxWriteParallel}
-            onChange={setNumber("maxWriteParallel")}
-            disabled={!available || busy}
-          />
-        </label>
-        <label>
-          只读/调研并行上限
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={config.maxReadOnlyParallel}
-            onChange={setNumber("maxReadOnlyParallel")}
-            disabled={!available || busy}
-          />
-        </label>
-        <label>
-          同项目隔离写入并行
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={config.maxIsolatedSameProjectWriteParallel}
-            onChange={setNumber("maxIsolatedSameProjectWriteParallel")}
-            disabled={!available || busy}
-          />
-        </label>
-        <label>
-          执行超时（毫秒）
-          <input
-            type="number"
-            min={0}
-            step={1000}
-            value={config.executionTimeoutMs}
-            onChange={setNumber("executionTimeoutMs")}
-            disabled={!available || busy}
-          />
-        </label>
-        <label title="同一步骤连续失败达此次数后自动暂停（写入 Run.execution.maxConsecutiveFailures）">
-          同一步骤连续失败上限
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={config.maxRetries}
-            onChange={setNumber("maxRetries")}
-            disabled={!available || busy}
-            aria-label="同一步骤连续失败上限"
-          />
-        </label>
-        <label>
-          最低可用磁盘（字节）
-          <input
-            type="number"
-            min={0}
-            step={1048576}
-            value={config.minFreeDiskBytes}
-            onChange={setNumber("minFreeDiskBytes")}
-            disabled={!available || busy}
-          />
-        </label>
-        <label>
-          最低可用内存（字节）
-          <input
-            type="number"
-            min={0}
-            step={1048576}
-            value={config.minFreeMemoryBytes}
-            onChange={setNumber("minFreeMemoryBytes")}
-            disabled={!available || busy}
-          />
-        </label>
-        <button type="submit" disabled={!available || busy}>保存配置</button>
-      </form>
-      {notice && <p className="notice" role="status">{notice}</p>}
-      {stopResult && (
-        <ul className="queue-stop-results">
+
+      <FormBlock onSubmit={(event) => void save(event)}>
+        <Grid2>
+          <Field label="写入并行上限">
+            <TextInput
+              type="number"
+              value={String(config.maxWriteParallel)}
+              onChange={setNumber("maxWriteParallel")}
+              disabled={!available || busy}
+            />
+          </Field>
+          <Field label="只读/调研并行上限">
+            <TextInput
+              type="number"
+              value={String(config.maxReadOnlyParallel)}
+              onChange={setNumber("maxReadOnlyParallel")}
+              disabled={!available || busy}
+            />
+          </Field>
+          <Field label="同项目隔离写入并行">
+            <TextInput
+              type="number"
+              value={String(config.maxIsolatedSameProjectWriteParallel)}
+              onChange={setNumber("maxIsolatedSameProjectWriteParallel")}
+              disabled={!available || busy}
+            />
+          </Field>
+          <Field label="执行超时（毫秒）">
+            <TextInput
+              type="number"
+              value={String(config.executionTimeoutMs)}
+              onChange={setNumber("executionTimeoutMs")}
+              disabled={!available || busy}
+            />
+          </Field>
+          <Field label="同一步骤连续失败上限">
+            <TextInput
+              type="number"
+              value={String(config.maxRetries)}
+              onChange={setNumber("maxRetries")}
+              disabled={!available || busy}
+              aria-label="同一步骤连续失败上限"
+            />
+          </Field>
+          <Field label="最低可用磁盘（字节）">
+            <TextInput
+              type="number"
+              value={String(config.minFreeDiskBytes)}
+              onChange={setNumber("minFreeDiskBytes")}
+              disabled={!available || busy}
+            />
+          </Field>
+          <Field label="最低可用内存（字节）">
+            <TextInput
+              type="number"
+              value={String(config.minFreeMemoryBytes)}
+              onChange={setNumber("minFreeMemoryBytes")}
+              disabled={!available || busy}
+            />
+          </Field>
+        </Grid2>
+        <PrimaryButton type="submit" isDisabled={!available || busy}>
+          保存配置
+        </PrimaryButton>
+      </FormBlock>
+
+      {notice ? <Notice>{notice}</Notice> : null}
+
+      {stopResult ? (
+        <Stack>
           {stopResult.results.map((entry) => (
-            <li key={entry.runId}>
-              <strong>{entry.runId.slice(0, 8)}</strong>
-              <span>
+            <ListCard
+              key={entry.runId}
+              actions={
+                <Tag color={entry.outcome === "paused" || entry.outcome === "skipped" ? "success" : "danger"}>
+                  {entry.outcome}
+                </Tag>
+              }
+            >
+              <strong className="block text-sm text-foreground">{entry.runId.slice(0, 8)}</strong>
+              <span className="block text-sm text-muted">
                 {entry.outcome}
                 {entry.processTerminated === true ? " · 进程已终止" : ""}
                 {entry.processTerminated === false ? " · 进程终止未确认" : ""}
               </span>
-              <small>{entry.message}</small>
-            </li>
+              <small className="block text-xs text-muted">{entry.message}</small>
+            </ListCard>
           ))}
-        </ul>
-      )}
-    </section>
+        </Stack>
+      ) : null}
+    </Panel>
   );
 }
 

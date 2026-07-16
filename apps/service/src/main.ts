@@ -4,6 +4,7 @@ import { WindowsFolderPicker, WorkspaceAuthorizer } from "./projects/workspaceAu
 import { TodoService } from "./todos/todoService.js";
 import { RunService } from "./runs/runService.js";
 import { ConnectionService, WindowsCredentialVault } from "./connections/connectionService.js";
+import { GithubService } from "./github/githubService.js";
 import { RoleService } from "./roles/roleService.js";
 import { ProfessionalAgentService } from "./execution/professionalAgentService.js";
 import { CodexCliService } from "./codex/codexCliService.js";
@@ -47,6 +48,7 @@ import { WatchdogService } from "./watchdog/watchdogService.js";
 import { OfficeCliRuntime } from "./officecli/officeCliRuntime.js";
 import { ZoteroConnector } from "./zotero/zoteroConnector.js";
 import { DocumentWorkflowService } from "./documentWorkflow/documentWorkflowService.js";
+import { ProviderService } from "./providers/providerService.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -58,14 +60,29 @@ async function main(): Promise<void> {
     join(dataDirectory, "state.json"),
     new WorkspaceAuthorizer(new WindowsFolderPicker())
   );
+  // Local todos: always have a default project workspace so plan→multi-agent can run.
+  await projects.ensureDefaultLocalProject(dataDirectory);
   const todos = await TodoService.open(join(dataDirectory, "todos.json"), projects);
   const runs = await RunService.open(join(dataDirectory, "runs.json"), todos);
+  const credentialVault = new WindowsCredentialVault();
   const connections = await ConnectionService.open(
     join(dataDirectory, "connections.json"),
-    new WindowsCredentialVault(),
+    credentialVault,
     fetch,
     (connectionId, reason) => runs.pauseForConnection(connectionId, reason).then(() => undefined)
   );
+  const github = await GithubService.open({
+    statePath: join(dataDirectory, "github.json"),
+    vault: credentialVault,
+    projects,
+    clonesRoot: join(dataDirectory, "github-clones")
+  });
+  const providers = new ProviderService({
+    connections,
+    vault: credentialVault,
+    fetchImpl: fetch
+  });
+  await providers.attachMetaPath(join(dataDirectory, "provider-meta.json"));
   const roles = await RoleService.open(join(dataDirectory, "roles.json"), connections);
   const worktrees = await GitWorktreeService.open(join(dataDirectory, "worktrees.json"));
   const resourceGuard = new ResourceGuardService(dataDirectory);
@@ -187,7 +204,24 @@ async function main(): Promise<void> {
     prepareContinuedExecution: (runId: string, summary: string) =>
       runs.prepareContinuedExecution(runId, summary),
     recordLog: (runId: string, input: { level: "info" | "warn" | "error"; message: string }) =>
-      runs.recordLog(runId, input)
+      runs.recordLog(runId, input),
+    resolveDefaultRole: async (input: { harness: "api" | "codex-cli"; taskType?: string }) => {
+      const list = await roles.list();
+      const enabled = list.filter((role) => role.enabled);
+      if (input.harness === "codex-cli") {
+        const codex =
+          enabled.find((role) => role.harness === "codex-cli" && role.allowFirstmateAutoInvoke) ||
+          enabled.find((role) => role.harness === "codex-cli");
+        return codex
+          ? { roleId: codex.id, name: codex.name, harness: "codex-cli" as const }
+          : undefined;
+      }
+      const api =
+        enabled.find((role) => role.harness === "api" && role.connectionId && role.allowFirstmateAutoInvoke) ||
+        enabled.find((role) => role.harness === "api" && role.connectionId) ||
+        enabled.find((role) => role.harness === "api");
+      return api ? { roleId: api.id, name: api.name, harness: "api" as const } : undefined;
+    }
   });
 
   const onExecutionSettled = async (event: {
@@ -359,6 +393,7 @@ async function main(): Promise<void> {
     version: serviceVersion,
     webRoot,
     projects,
+    github,
     todos,
     runs,
     connections,
@@ -388,6 +423,7 @@ async function main(): Promise<void> {
     documentWorkflow,
     zotero,
     officeCli,
+    providers,
     reviews,
     backup,
     queue,

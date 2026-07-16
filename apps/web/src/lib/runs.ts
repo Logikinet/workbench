@@ -527,6 +527,30 @@ export interface AcceptanceResultRecord {
   todo: { id: string; status: string; title: string };
 }
 
+/** Per-model token counters for a Run (todos-style Token 用量). */
+export interface RunUsageModelRecord {
+  modelId: string;
+  connectionId?: string;
+  roleId?: string;
+  label?: string;
+  promptTokens: number;
+  completionTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  calls: number;
+  estimated: boolean;
+}
+
+export interface RunUsageRecord {
+  promptTokens: number;
+  completionTokens: number;
+  cacheTokens: number;
+  totalTokens: number;
+  estimated: boolean;
+  byModel: RunUsageModelRecord[];
+  updatedAt: string;
+}
+
 export interface RunRecord {
   id: string;
   todoId: string;
@@ -551,12 +575,42 @@ export interface RunRecord {
   checkpointRecovery?: CheckpointRecoveryRecord;
   askUserRequests?: AskUserRequestRecord[];
   waitingForUserResume?: { previousStatus: RunStatus; since: string };
+  usage?: RunUsageRecord;
   createdAt: string;
   updatedAt: string;
 }
 
+/** Compact display like todos (202.5k / 1.2M / 850). */
+export function formatTokenCount(n: number): string {
+  const value = Math.max(0, Math.floor(n || 0));
+  if (value >= 1_000_000) {
+    const m = value / 1_000_000;
+    return `${m >= 10 ? m.toFixed(0) : m.toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  if (value >= 10_000) {
+    const k = value / 1000;
+    return `${k >= 100 ? k.toFixed(0) : k.toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return String(value);
+}
+
 export function reconcileRunSelection(runIds: string[], currentId: string): string {
   return runIds.includes(currentId) ? currentId : (runIds[0] ?? "");
+}
+
+/** Result of server-side multi-agent orchestration after plan approval. */
+export interface PlanOrchestrationResult {
+  runId?: string;
+  dagCreated?: boolean;
+  scheduled?: string[];
+  startedAgents?: Array<{ subtaskId: string; harness: "api" | "codex-cli"; roleId?: string }>;
+  completedSubtasks?: string[];
+  dagComplete?: boolean;
+  errors?: string[];
+  error?: string;
 }
 
 /**
@@ -585,6 +639,8 @@ export function createRunClient(serviceUrl: string) {
         method: "POST",
         body: JSON.stringify({ message })
       }),
+    get: (runId: string) => requestJson<RunRecord>(`/api/runs/${encodeURIComponent(runId)}`),
+    usage: (runId: string) => requestJson<RunUsageRecord>(`/api/runs/${encodeURIComponent(runId)}/usage`),
     addMessage: (runId: string, content: string) =>
       requestJson<RunRecord>(`/api/runs/${encodeURIComponent(runId)}/messages`, {
         method: "POST",
@@ -619,9 +675,28 @@ export function createRunClient(serviceUrl: string) {
         method: "PATCH",
         body: JSON.stringify(payload)
       }),
+    /** Approve/return/cancel plan; when approved, server multi-agent orchestrates (DAG + roles). */
+    decidePlanDetailed: async (
+      runId: string,
+      payload: { decision: "approved" | "returned" | "cancelled"; summary: string }
+    ): Promise<{ run: RunRecord; orchestration?: PlanOrchestrationResult }> => {
+      const body = await requestJson<RunRecord | { run: RunRecord; orchestration?: PlanOrchestrationResult }>(
+        `/api/runs/${encodeURIComponent(runId)}/plan-decisions`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload)
+        }
+      );
+      if (body && typeof body === "object" && "run" in body && body.run) {
+        return {
+          run: body.run,
+          orchestration: body.orchestration
+        };
+      }
+      return { run: unwrapRunRecord(body) };
+    },
     decidePlan: async (runId: string, payload: { decision: "approved" | "returned" | "cancelled"; summary: string }) => {
-      // Server may return either a bare RunRecord or { run, orchestration } after approve.
-      const body = await requestJson<RunRecord | { run: RunRecord; orchestration?: unknown }>(
+      const body = await requestJson<RunRecord | { run: RunRecord; orchestration?: PlanOrchestrationResult }>(
         `/api/runs/${encodeURIComponent(runId)}/plan-decisions`,
         {
           method: "POST",

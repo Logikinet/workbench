@@ -9,6 +9,16 @@ export type ProjectStatus = "active" | "archived";
 /** Whether the bound main workspace directory is present on this machine after restore. */
 export type WorkspaceLinkStatus = "linked" | "needs_repair";
 
+/** todos-style GitHub repo binding on a Project. */
+export interface ProjectGithubBinding {
+  accountId: string;
+  fullName: string;
+  htmlUrl: string;
+  private?: boolean;
+  defaultBranch?: string;
+  cloneUrl?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -19,6 +29,8 @@ export interface Project {
   /** Present after backup restore when the path may be missing on this PC. Defaults to linked. */
   workspaceLinkStatus?: WorkspaceLinkStatus;
   workspaceRepairNote?: string;
+  /** When set, project is bound like todos GitHub-linked workspace. */
+  github?: ProjectGithubBinding;
   createdAt: string;
   updatedAt: string;
 }
@@ -33,6 +45,7 @@ export interface CreateProjectInput {
   workspacePath: string;
   summary?: string;
   authorizationGrantId: string;
+  github?: ProjectGithubBinding;
 }
 
 export interface UpdateProjectInput {
@@ -100,6 +113,69 @@ export class ProjectService {
       workspacePath,
       summary: input.summary?.trim() || undefined,
       authorization,
+      status: "active",
+      workspaceLinkStatus: "linked",
+      github: input.github,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.state.projects.push(project);
+    await this.persist();
+    return project;
+  }
+
+  /**
+   * Create project with internal authorization (GitHub clone / trusted local path).
+   * Used by todos-style GitHub binding — no Windows folder picker grant required.
+   */
+  async createLinked(input: {
+    name: string;
+    workspacePath: string;
+    summary?: string;
+    github?: ProjectGithubBinding;
+  }): Promise<Project> {
+    const name = input.name.trim();
+    if (!name) throw new Error("A Project name is required.");
+    const workspacePath = await this.validateWorkspace(input.workspacePath);
+    const now = new Date().toISOString();
+    const project: Project = {
+      id: randomUUID(),
+      name,
+      workspacePath,
+      summary: input.summary?.trim() || undefined,
+      authorization: { workspacePath, confirmedAt: now },
+      status: "active",
+      workspaceLinkStatus: "linked",
+      github: input.github,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.state.projects.push(project);
+    await this.persist();
+    return project;
+  }
+
+  /**
+   * Local todos bootstrap: if no active project exists, create a sandboxed default
+   * workspace under the service data directory so multi-agent runs can execute
+   * without requiring a Windows folder picker first.
+   */
+  async ensureDefaultLocalProject(dataDirectory: string): Promise<Project> {
+    const active = this.state.projects
+      .filter((entry) => entry.status === "active")
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    if (active[0]) return active[0];
+
+    const workspacePath = resolve(dataDirectory, "default-workspace");
+    await mkdir(workspacePath, { recursive: true });
+    const validated = await this.validateWorkspace(workspacePath);
+    const now = new Date().toISOString();
+    const project: Project = {
+      id: randomUUID(),
+      name: "本机默认工作区",
+      workspacePath: validated,
+      summary: "本地自动创建：任务执行与多 Agent 编排的默认项目目录",
+      authorization: { workspacePath: validated, confirmedAt: now },
       status: "active",
       workspaceLinkStatus: "linked",
       createdAt: now,

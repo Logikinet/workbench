@@ -167,6 +167,12 @@ export interface ToolLoopResult {
   summary: string;
   turns: number;
   totalTokens: number;
+  /** Sum of API-reported or estimated prompt tokens across turns. */
+  promptTokens: number;
+  /** Sum of API-reported or estimated completion tokens across turns. */
+  completionTokens: number;
+  /** True when any turn fell back to content-length estimation. */
+  tokensEstimated: boolean;
   durationMs: number;
   /** Final agent summary when status is completed. */
   finalSummary?: string;
@@ -317,6 +323,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
   const toolTrace: ToolLoopResult["toolTrace"] = [];
   const artifacts: ToolLoopResult["artifacts"] = [];
   let totalTokens = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let tokensEstimated = false;
   let turns = 0;
   let toolCallCounter = 0;
 
@@ -340,6 +349,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: "Professional Agent tool loop was interrupted.",
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -351,19 +363,19 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
       if (elapsed >= limits.maxDurationMs) {
         const message = `Tool loop exceeded time limit (${limits.maxDurationMs}ms).`;
         await emit({ kind: "limit", limit: "time", message });
-        return failLimit(message, turns, totalTokens, elapsed, toolTrace, artifacts);
+        return failLimit(message, turns, totalTokens, promptTokens, completionTokens, tokensEstimated, elapsed, toolTrace, artifacts);
       }
 
       if (turns >= limits.maxTurns) {
         const message = `Tool loop exceeded max turns (${limits.maxTurns}).`;
         await emit({ kind: "limit", limit: "turns", message });
-        return failLimit(message, turns, totalTokens, elapsed, toolTrace, artifacts);
+        return failLimit(message, turns, totalTokens, promptTokens, completionTokens, tokensEstimated, elapsed, toolTrace, artifacts);
       }
 
       if (totalTokens >= limits.maxTokens) {
         const message = `Tool loop exceeded token budget (${limits.maxTokens}).`;
         await emit({ kind: "limit", limit: "tokens", message });
-        return failLimit(message, turns, totalTokens, elapsed, toolTrace, artifacts);
+        return failLimit(message, turns, totalTokens, promptTokens, completionTokens, tokensEstimated, elapsed, toolTrace, artifacts);
       }
 
       turns += 1;
@@ -371,19 +383,26 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
 
       const messages = buildCompactMessages(seed, history, tools);
       const modelResult = await host.invokeModel(messages, host.signal);
-      const usageTokens = estimateTokens(modelResult);
-      totalTokens += usageTokens;
+      const turnUsage = measureTurnUsage(modelResult);
+      totalTokens += turnUsage.totalTokens;
+      promptTokens += turnUsage.promptTokens;
+      completionTokens += turnUsage.completionTokens;
+      if (turnUsage.estimated) tokensEstimated = true;
       await emit({
         kind: "model_response",
         turn: turns,
         contentSummary: clip(modelResult.content, 300),
-        usage: modelResult.usage
+        usage: modelResult.usage ?? {
+          promptTokens: turnUsage.promptTokens,
+          completionTokens: turnUsage.completionTokens,
+          totalTokens: turnUsage.totalTokens
+        }
       });
 
       if (totalTokens >= limits.maxTokens) {
         const message = `Tool loop exceeded token budget (${limits.maxTokens}).`;
         await emit({ kind: "limit", limit: "tokens", message });
-        return failLimit(message, turns, totalTokens, now() - startedAt, toolTrace, artifacts);
+        return failLimit(message, turns, totalTokens, promptTokens, completionTokens, tokensEstimated, now() - startedAt, toolTrace, artifacts);
       }
 
       let turn: AgentTurn;
@@ -396,6 +415,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: message,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -411,6 +433,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           finalActions: turn.actions,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts
@@ -424,6 +449,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: turn.prompt,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -446,6 +474,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: turn.prompt,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -464,6 +495,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: turn.summary,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -511,6 +545,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: "Professional Agent tool loop was interrupted.",
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -576,6 +613,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: clipped.needsApproval.summary,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -594,6 +634,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
           summary: clipped.needsUserInput.prompt,
           turns,
           totalTokens,
+          promptTokens,
+          completionTokens,
+          tokensEstimated,
           durationMs: now() - startedAt,
           toolTrace,
           artifacts,
@@ -617,6 +660,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
         summary: message,
         turns,
         totalTokens,
+        promptTokens,
+        completionTokens,
+        tokensEstimated,
         durationMs: now() - startedAt,
         toolTrace,
         artifacts,
@@ -628,6 +674,9 @@ export async function runToolLoop(host: ToolLoopHost, seed: ToolLoopSeed): Promi
       summary: message,
       turns,
       totalTokens,
+      promptTokens,
+      completionTokens,
+      tokensEstimated,
       durationMs: now() - startedAt,
       toolTrace,
       artifacts,
@@ -732,19 +781,47 @@ function redactArgsForHistory(args: Record<string, unknown>): Record<string, unk
   return out;
 }
 
-function estimateTokens(result: ModelTurnResult): number {
-  if (result.usage?.totalTokens && result.usage.totalTokens > 0) return result.usage.totalTokens;
-  const prompt = result.usage?.promptTokens ?? 0;
-  const completion = result.usage?.completionTokens ?? 0;
-  if (prompt + completion > 0) return prompt + completion;
+function measureTurnUsage(result: ModelTurnResult): {
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  estimated: boolean;
+} {
+  const prompt = Math.max(0, result.usage?.promptTokens ?? 0);
+  const completion = Math.max(0, result.usage?.completionTokens ?? 0);
+  if (result.usage?.totalTokens && result.usage.totalTokens > 0) {
+    return {
+      totalTokens: result.usage.totalTokens,
+      promptTokens: prompt > 0 ? prompt : result.usage.totalTokens,
+      completionTokens: completion,
+      estimated: prompt <= 0 && completion <= 0
+    };
+  }
+  if (prompt + completion > 0) {
+    return {
+      totalTokens: prompt + completion,
+      promptTokens: prompt,
+      completionTokens: completion,
+      estimated: false
+    };
+  }
   // Rough fallback: ~4 chars per token on content only.
-  return Math.max(1, Math.ceil(result.content.length / 4));
+  const estimated = Math.max(1, Math.ceil(result.content.length / 4));
+  return {
+    totalTokens: estimated,
+    promptTokens: estimated,
+    completionTokens: 0,
+    estimated: true
+  };
 }
 
 function failLimit(
   message: string,
   turns: number,
   totalTokens: number,
+  promptTokens: number,
+  completionTokens: number,
+  tokensEstimated: boolean,
   durationMs: number,
   toolTrace: ToolLoopResult["toolTrace"],
   artifacts: ToolLoopResult["artifacts"]
@@ -754,6 +831,9 @@ function failLimit(
     summary: message,
     turns,
     totalTokens,
+    promptTokens,
+    completionTokens,
+    tokensEstimated,
     durationMs,
     toolTrace,
     artifacts,

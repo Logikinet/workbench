@@ -6,6 +6,25 @@ import {
   type SessionStatus
 } from "../lib/sessions.js";
 import { ToolCards } from "./ToolCards.js";
+import {
+  DangerButton,
+  Divider,
+  EmptyHint,
+  Field,
+  FormBlock,
+  Grid2,
+  ListCard,
+  Notice,
+  Panel,
+  PrimaryButton,
+  QuietButton,
+  RowActions,
+  SelectField,
+  Stack,
+  Tag,
+  TextAreaField,
+  TextInput
+} from "./ui.js";
 
 interface SessionPanelProps {
   serviceUrl: string;
@@ -262,131 +281,161 @@ export function SessionPanel({
   }, [selected?.id]);
 
   return (
-    <section className="workspace-panel session-panel" aria-labelledby="session-panel-title">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">AGENT SESSIONS</p>
-          <h2 id="session-panel-title">会话管理与 Tool Cards</h2>
-        </div>
-        <button type="button" className="quiet-button" disabled={!available || busy} onClick={() => void reloadList()}>
+    <Panel
+      eyebrow="AGENT SESSIONS"
+      title="会话管理与 Tool Cards"
+      actions={
+        <QuietButton isDisabled={!available || busy} onPress={() => void reloadList()}>
           刷新
-        </button>
-      </div>
+        </QuietButton>
+      }
+    >
+      <Grid2>
+        <Field label="搜索会话">
+          <TextInput
+            aria-label="搜索会话"
+            placeholder="搜索标题 / 卡片摘要"
+            value={q}
+            onChange={(event) => setQ(event.target.value)}
+          />
+        </Field>
+        <Field label="标签筛选">
+          <TextInput
+            aria-label="标签筛选"
+            placeholder="标签"
+            value={tag}
+            onChange={(event) => setTag(event.target.value)}
+          />
+        </Field>
+        <Field label="Project ID">
+          <TextInput
+            aria-label="Project ID"
+            placeholder="Project ID"
+            value={projectId}
+            onChange={(event) => setProjectId(event.target.value)}
+          />
+        </Field>
+        <Field label="Agent Role ID">
+          <TextInput
+            aria-label="Agent Role ID"
+            placeholder="Agent Role ID"
+            value={agentRoleId}
+            onChange={(event) => setAgentRoleId(event.target.value)}
+          />
+        </Field>
+        <Field label="状态筛选">
+          <SelectField
+            aria-label="状态筛选"
+            value={status}
+            onChange={(event) => setStatus(event.target.value as "" | SessionStatus)}
+          >
+            {statusOptions.map((option) => (
+              <option key={option.label} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </SelectField>
+        </Field>
+      </Grid2>
 
-      <div className="session-filters">
-        <input
-          aria-label="搜索会话"
-          placeholder="搜索标题 / 卡片摘要"
-          value={q}
-          onChange={(event) => setQ(event.target.value)}
-        />
-        <input
-          aria-label="标签筛选"
-          placeholder="标签"
-          value={tag}
-          onChange={(event) => setTag(event.target.value)}
-        />
-        <input
-          aria-label="Project ID"
-          placeholder="Project ID"
-          value={projectId}
-          onChange={(event) => setProjectId(event.target.value)}
-        />
-        <input
-          aria-label="Agent Role ID"
-          placeholder="Agent Role ID"
-          value={agentRoleId}
-          onChange={(event) => setAgentRoleId(event.target.value)}
-        />
-        <select
-          aria-label="状态筛选"
-          value={status}
-          onChange={(event) => setStatus(event.target.value as "" | SessionStatus)}
-        >
-          {statusOptions.map((option) => (
-            <option key={option.label} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <form className="session-create" onSubmit={(event) => void createSession(event)}>
-        <input
-          aria-label="会话标题"
-          placeholder="新会话标题"
-          value={newTitle}
-          onChange={(event) => setNewTitle(event.target.value)}
-        />
-        <input
-          aria-label="标签"
-          placeholder="标签（逗号分隔）"
-          value={newTags}
-          onChange={(event) => setNewTags(event.target.value)}
-        />
-        <input
-          aria-label="首选模型"
-          placeholder="会话首选模型（不改全局 Role）"
-          value={preferredModel}
-          onChange={(event) => setPreferredModel(event.target.value)}
-        />
-        <button type="submit" disabled={!available || busy}>
+      <FormBlock onSubmit={(event) => void createSession(event)}>
+        <Grid2>
+          <Field label="会话标题">
+            <TextInput
+              aria-label="会话标题"
+              placeholder="新会话标题"
+              value={newTitle}
+              onChange={(event) => setNewTitle(event.target.value)}
+            />
+          </Field>
+          <Field label="标签">
+            <TextInput
+              aria-label="标签"
+              placeholder="标签（逗号分隔）"
+              value={newTags}
+              onChange={(event) => setNewTags(event.target.value)}
+            />
+          </Field>
+          <Field label="首选模型">
+            <TextInput
+              aria-label="首选模型"
+              placeholder="会话首选模型（不改全局 Role）"
+              value={preferredModel}
+              onChange={(event) => setPreferredModel(event.target.value)}
+            />
+          </Field>
+        </Grid2>
+        <PrimaryButton type="submit" isDisabled={!available || busy}>
           新建会话
-        </button>
-      </form>
+        </PrimaryButton>
+      </FormBlock>
 
-      <div className="session-layout">
-        <ul className="session-list" aria-label="会话列表">
+      <div className="grid gap-4 lg:grid-cols-[minmax(14rem,18rem)_1fr]">
+        <Stack>
+          <div className="visually-hidden" id="session-list-label">
+            会话列表
+          </div>
           {sessions.map((session) => (
-            <li key={session.id}>
+            <ListCard
+              key={session.id}
+              className={session.id === selectedId ? "ring-2 ring-accent" : undefined}
+              actions={
+                <QuietButton onPress={() => setSelectedId(session.id)}>
+                  {session.id === selectedId ? "已选中" : "打开"}
+                </QuietButton>
+              }
+            >
               <button
                 type="button"
-                className={session.id === selectedId ? "active-tab" : "quiet-button"}
+                className="m-0 w-full border-0 bg-transparent p-0 text-left"
                 onClick={() => setSelectedId(session.id)}
               >
                 <strong>{session.title}</strong>
-                <span>
+                <p className="m-0 text-sm text-muted">
                   {session.status} · {session.cardCount} cards
-                </span>
-                {session.tags.length > 0 && <small>{session.tags.join(" · ")}</small>}
+                </p>
+                {session.tags.length > 0 ? (
+                  <p className="m-0 text-xs text-muted">{session.tags.join(" · ")}</p>
+                ) : null}
               </button>
-            </li>
+            </ListCard>
           ))}
-          {sessions.length === 0 && <li className="notice">暂无会话</li>}
-        </ul>
+          {sessions.length === 0 && <EmptyHint>暂无会话</EmptyHint>}
+        </Stack>
 
-        <div className="session-detail">
+        <Stack>
           {selected ? (
             <>
-              <div className="session-detail-meta">
-                <div>
-                  <h3>{selected.title}</h3>
-                  <p>
-                    {selected.status}
-                    {selected.preferredModelId ? ` · model ${selected.preferredModelId}` : ""}
-                    {selected.agentName ? ` · ${selected.agentName}` : ""}
-                  </p>
-                  {selected.messageQueue.length > 0 && (
-                    <p className="notice">排队中 {selected.messageQueue.length} 条消息</p>
-                  )}
-                </div>
-                <div className="session-detail-actions">
-                  <button type="button" className="quiet-button" disabled={busy} onClick={() => void saveSessionMeta()}>
-                    保存标签/模型
-                  </button>
-                  <button type="button" className="quiet-button" disabled={busy} onClick={() => void clearSession()}>
-                    清空
-                  </button>
-                  <button type="button" className="danger-button" disabled={busy} onClick={() => void deleteSession()}>
-                    删除
-                  </button>
-                </div>
-              </div>
+              <ListCard
+                actions={
+                  <>
+                    <QuietButton isDisabled={busy} onPress={() => void saveSessionMeta()}>
+                      保存标签/模型
+                    </QuietButton>
+                    <QuietButton isDisabled={busy} onPress={() => void clearSession()}>
+                      清空
+                    </QuietButton>
+                    <DangerButton isDisabled={busy} onPress={() => void deleteSession()}>
+                      删除
+                    </DangerButton>
+                  </>
+                }
+              >
+                <h3 className="m-0 text-base font-semibold">{selected.title}</h3>
+                <p className="m-0 text-sm text-muted">
+                  {selected.status}
+                  {selected.preferredModelId ? ` · model ${selected.preferredModelId}` : ""}
+                  {selected.agentName ? ` · ${selected.agentName}` : ""}
+                </p>
+                {selected.messageQueue.length > 0 && (
+                  <Tag color="warning">排队中 {selected.messageQueue.length} 条消息</Tag>
+                )}
+              </ListCard>
 
               {hasMoreOlder && (
-                <button type="button" className="quiet-button" onClick={() => void loadOlder()}>
+                <QuietButton onPress={() => void loadOlder()}>
                   加载更早卡片（{cards.length}/{cardsTotal}）
-                </button>
+                </QuietButton>
               )}
 
               <ToolCards
@@ -414,42 +463,53 @@ export function SessionPanel({
                 }}
               />
 
-              <div className="session-composer">
-                <textarea
-                  aria-label="会话输入"
-                  rows={3}
-                  placeholder={
-                    selected.status === "streaming"
-                      ? "流式执行中仍可输入：将排队或作为纠偏"
-                      : "输入消息…"
-                  }
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  disabled={!available}
-                />
+              <Divider />
+
+              <Stack>
+                <Field label="会话输入">
+                  <TextAreaField
+                    aria-label="会话输入"
+                    rows={3}
+                    placeholder={
+                      selected.status === "streaming"
+                        ? "流式执行中仍可输入：将排队或作为纠偏"
+                        : "输入消息…"
+                    }
+                    value={draft}
+                    onChange={(event) => setDraft(event.target.value)}
+                    disabled={!available}
+                  />
+                </Field>
                 {selected.status === "streaming" && (
-                  <select
-                    aria-label="发送模式"
-                    value={sendMode}
-                    onChange={(event) => setSendMode(event.target.value as typeof sendMode)}
-                  >
-                    <option value="queue">排队（结束后发送）</option>
-                    <option value="correction">纠偏</option>
-                    <option value="force">立即写入时间线</option>
-                  </select>
+                  <Field label="发送模式">
+                    <SelectField
+                      aria-label="发送模式"
+                      value={sendMode}
+                      onChange={(event) => setSendMode(event.target.value as typeof sendMode)}
+                    >
+                      <option value="queue">排队（结束后发送）</option>
+                      <option value="correction">纠偏</option>
+                      <option value="force">立即写入时间线</option>
+                    </SelectField>
+                  </Field>
                 )}
-                <button type="button" disabled={!available || busy || !draft.trim()} onClick={() => void sendMessage()}>
-                  发送
-                </button>
-              </div>
+                <RowActions>
+                  <PrimaryButton
+                    isDisabled={!available || busy || !draft.trim()}
+                    onPress={() => void sendMessage()}
+                  >
+                    发送
+                  </PrimaryButton>
+                </RowActions>
+              </Stack>
             </>
           ) : (
-            <p className="notice">选择或创建一个会话。</p>
+            <EmptyHint>选择或创建一个会话。</EmptyHint>
           )}
-        </div>
+        </Stack>
       </div>
 
-      {notice && <p className="notice">{notice}</p>}
-    </section>
+      {notice ? <Notice>{notice}</Notice> : null}
+    </Panel>
   );
 }

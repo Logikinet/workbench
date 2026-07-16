@@ -66,11 +66,20 @@ describe("Provider presets and schema validation", () => {
       })
     ).toThrow(/Base URL/);
 
+    // custom allows deferred credential (todos CLI: empty key → configure later)
     expect(() =>
       validateProviderConfig({
         presetId: "custom",
         baseUrl: "https://api.example.test/v1",
         modelId: "m"
+      })
+    ).not.toThrow();
+
+    // openai still requires a key
+    expect(() =>
+      validateProviderConfig({
+        presetId: "openai",
+        modelId: "gpt-4o"
       })
     ).toThrow(/API Key/);
 

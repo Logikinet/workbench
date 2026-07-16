@@ -68,6 +68,7 @@ PWA 导航 **「文档工作流」**（`#/documents`），或调用 `/api/docume
 - Windows 10/11
 - [Node.js](https://nodejs.org/) 20+
 - Git
+- 前端 UI：[HeroUI](https://www.heroui.com/) v3 + Tailwind CSS v4（Vite React，无需 Next.js）
 - 可选：[Codex CLI](https://github.com/openai/codex)（代码隔离执行）
 - 可选：[OfficeCLI](https://github.com/iOfficeAI/OfficeCLI)（报告/论文 DOCX 自动化）
 - 可选：[Zotero](https://www.zotero.org/) 桌面端并开启本地 API（默认 `http://127.0.0.1:23119/api`）
@@ -388,11 +389,31 @@ docs/
 | Command | Description |
 | --- | --- |
 | `npm run dev` | 开发模式启动 service + web |
-| `npm run build` | 构建 service、web、tray |
+| `npm run build` | 构建 service、web、tray、cli |
 | `npm test` | 运行测试 |
 | `npm run typecheck` | TypeScript 检查 |
 | `npm run pack:windows` | 运行 Windows 安装脚本 |
 | `npm run release-gate` | CI 安全路径的发布门禁检查 |
+| `npm run pawb -- …` | 本机 CLI（Provider 管理等，需先启动 service） |
+
+### pawb CLI（Provider）
+
+服务启动后（`npm run dev` 或托盘）：
+
+```powershell
+npm run pawb -- health
+npm run pawb -- provider add
+npm run pawb -- provider list
+npm run pawb -- provider list --json
+npm run pawb -- provider test <id>
+npm run pawb -- provider remove <id>
+```
+
+- CLI 与 PWA 共用 `http://127.0.0.1:41731`，**不直接写数据库**
+- **禁止** `--api-key` 明文；API Key 仅交互遮罩输入或环境变量名
+- 安装后 `pawb` 可写入用户 PATH（`%LOCALAPPDATA%\PersonalAIWorkbench\bin`）
+
+详见 `reports/provider-cli-tasks05-05a.md`。
 
 ## Known residual risks
 

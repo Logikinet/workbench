@@ -133,6 +133,16 @@ export interface ChatCompletionInput {
   signal?: AbortSignal;
 }
 
+export interface ChatCompletionResult {
+  content: string;
+  modelId: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}
+
 export interface DiscoveredModel {
   id: string;
   ownedBy?: string;
@@ -862,6 +872,12 @@ export class ConnectionService {
   }
 
   async chatCompletion(connectionId: string, input: ChatCompletionInput): Promise<string> {
+    const result = await this.chatCompletionDetailed(connectionId, input);
+    return result.content;
+  }
+
+  /** Same as chatCompletion but returns provider usage when available. */
+  async chatCompletionDetailed(connectionId: string, input: ChatCompletionInput): Promise<ChatCompletionResult> {
     if (input.signal?.aborted) throw new Error("Professional Agent request was interrupted.");
     const connection = await this.getMutable(connectionId);
     if (!connection.enabled) throw new Error("模型连接已停用。");
@@ -894,9 +910,20 @@ export class ConnectionService {
       }
       const payload = (await response.json()) as {
         choices?: Array<{ message?: { content?: unknown } }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+          prompt_tokens_details?: { cached_tokens?: number };
+        };
       };
+      let usage: ChatCompletionResult["usage"];
       if (payload.usage) {
+        usage = {
+          promptTokens: payload.usage.prompt_tokens,
+          completionTokens: payload.usage.completion_tokens,
+          totalTokens: payload.usage.total_tokens
+        };
         connection.lastUsage = {
           available: true,
           source: "last_completion",
@@ -910,7 +937,7 @@ export class ConnectionService {
       }
       const content = payload.choices?.[0]?.message?.content;
       if (typeof content !== "string" || !content.trim()) throw new Error("模型未返回可执行的专业代理输出。");
-      return content;
+      return { content, modelId, usage };
     } catch (error) {
       if (input.signal?.aborted) throw new Error("Professional Agent request was interrupted.");
       if (error instanceof Error && /认证失败|模型服务或模型 ID|连接失败|模型未返回/.test(error.message)) throw error;
